@@ -1,0 +1,702 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   CapCut-Lite — Стили видеоредактора
+   Тёмная тема, вдохновлённая CapCut/DaVinci Resolve
+═══════════════════════════════════════════════════════════════════════ */
+
+/* ─── Сброс и базовые переменные ──────────────────────────────────────── */
+
+:root {
+    --bg-dark: #1a1a2e;
+    --bg-medium: #16213e;
+    --bg-light: #0f3460;
+    --bg-panel: #1e2a4a;
+    --accent: #e94560;
+    --accent-hover: #ff6b81;
+    --accent-green: #2ecc71;
+    --accent-blue: #3498db;
+    --accent-yellow: #f39c12;
+    --text-primary: #ecf0f1;
+    --text-secondary: #95a5a6;
+    --text-muted: #636e72;
+    --border: #2c3e50;
+    --marker-color: #e94560;
+    --marker-selected: #ff6b81;
+    --playhead-color: #e74c3c;
+    --track-bg: #1e2a4a;
+    --ruler-bg: #0d1b2a;
+    --shadow: 0 2px 8px rgba(0,0,0,0.3);
+    --radius: 6px;
+    --transition: 0.2s ease;
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg-dark);
+    color: var(--text-primary);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+/* ─── Верхняя панель (toolbar) ────────────────────────────────────────── */
+
+.toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 16px;
+    background: var(--bg-medium);
+    border-bottom: 1px solid var(--border);
+    height: 48px;
+    flex-shrink: 0;
+}
+
+.logo {
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--accent);
+    letter-spacing: -0.5px;
+}
+
+.toolbar-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.toolbar-actions input[type="text"] {
+    background: var(--bg-dark);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    padding: 4px 10px;
+    border-radius: var(--radius);
+    font-size: 13px;
+    width: 160px;
+}
+
+/* ─── Кнопки ─────────────────────────────────────────────────────────── */
+
+button {
+    background: var(--bg-light);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    padding: 6px 12px;
+    border-radius: var(--radius);
+    font-size: 12px;
+    cursor: pointer;
+    transition: all var(--transition);
+    white-space: nowrap;
+}
+
+button:hover:not(:disabled) {
+    background: var(--accent);
+    border-color: var(--accent);
+}
+
+button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.btn-primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: white;
+    font-weight: 600;
+    padding: 8px 16px;
+    font-size: 13px;
+}
+
+.btn-primary:hover:not(:disabled) {
+    background: var(--accent-hover);
+    border-color: var(--accent-hover);
+}
+
+.btn-danger {
+    background: transparent;
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+.btn-danger:hover {
+    background: var(--accent) !important;
+    color: white;
+}
+
+.btn-small {
+    padding: 3px 8px;
+    font-size: 11px;
+}
+
+/* ─── Основная область (workspace) ───────────────────────────────────── */
+
+.workspace {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+}
+
+/* ─── Видеоплеер ─────────────────────────────────────────────────────── */
+
+.player-section {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    padding: 12px;
+    min-width: 0;
+}
+
+.video-container {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #000;
+    border-radius: var(--radius);
+    overflow: hidden;
+    position: relative;
+    min-height: 200px;
+}
+
+.video-container video {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+}
+
+.placeholder {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    color: var(--text-secondary);
+    font-size: 14px;
+    padding: 20px;
+    text-align: center;
+}
+
+.placeholder p {
+    font-size: 16px;
+}
+
+.player-controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 0;
+}
+
+#time-display {
+    font-size: 12px;
+    color: var(--text-secondary);
+    font-family: 'Courier New', monospace;
+}
+
+#volume-slider {
+    width: 80px;
+    accent-color: var(--accent);
+}
+
+/* ─── Панель свойств (правая) ────────────────────────────────────────── */
+
+.properties-panel {
+    width: 300px;
+    background: var(--bg-panel);
+    border-left: 1px solid var(--border);
+    padding: 12px;
+    overflow-y: auto;
+    flex-shrink: 0;
+}
+
+.properties-panel h3 {
+    font-size: 13px;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+}
+
+.prop-group {
+    margin-bottom: 12px;
+}
+
+.prop-group label {
+    display: block;
+    font-size: 11px;
+    color: var(--text-secondary);
+    margin-bottom: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+
+.prop-group textarea,
+.prop-group input[type="number"],
+.prop-group select {
+    width: 100%;
+    background: var(--bg-dark);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    padding: 6px 10px;
+    border-radius: var(--radius);
+    font-size: 13px;
+    font-family: inherit;
+    resize: vertical;
+}
+
+.prop-group textarea:focus,
+.prop-group input:focus,
+.prop-group select:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.prop-group input[type="file"] {
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.hint {
+    color: var(--text-muted);
+    font-size: 12px;
+    text-align: center;
+    padding: 20px 10px;
+}
+
+/* ─── TTS варианты ───────────────────────────────────────────────────── */
+
+.tts-section {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+}
+
+.status-text {
+    font-size: 11px;
+    margin-top: 6px;
+    color: var(--text-secondary);
+}
+
+.status-text.loading { color: var(--accent-yellow); }
+.status-text.error { color: var(--accent); }
+.status-text.success { color: var(--accent-green); }
+
+.variants-list {
+    margin-top: 10px;
+}
+
+.variants-list h4 {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+}
+
+.variant-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px;
+    background: var(--bg-dark);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 6px;
+    transition: all var(--transition);
+}
+
+.variant-item:hover {
+    border-color: var(--accent-blue);
+}
+
+.variant-item.selected {
+    border-color: var(--accent-green);
+    background: rgba(46, 204, 113, 0.1);
+}
+
+.variant-item.loading {
+    opacity: 0.6;
+}
+
+.variant-item.error {
+    border-color: var(--accent);
+    opacity: 0.7;
+}
+
+.variant-voice {
+    font-size: 11px;
+    color: var(--text-secondary);
+    min-width: 50px;
+}
+
+.variant-item audio {
+    height: 28px;
+    flex: 1;
+    min-width: 0;
+}
+
+.variant-item .btn-select {
+    background: var(--accent-green);
+    border-color: var(--accent-green);
+    color: white;
+    font-size: 11px;
+    padding: 3px 8px;
+}
+
+.variant-status {
+    font-size: 10px;
+    color: var(--text-muted);
+}
+
+/* ─── Аудио-информация ───────────────────────────────────────────────── */
+
+.audio-info {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px;
+    background: rgba(46, 204, 113, 0.1);
+    border: 1px solid var(--accent-green);
+    border-radius: var(--radius);
+    margin-top: 8px;
+    font-size: 12px;
+}
+
+#attached-audio-name {
+    flex: 1;
+    color: var(--accent-green);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* ─── Таймлайн ───────────────────────────────────────────────────────── */
+
+.timeline-section {
+    flex-shrink: 0;
+    border-top: 1px solid var(--border);
+    background: var(--bg-medium);
+    height: 180px;
+    display: flex;
+    flex-direction: column;
+}
+
+.timeline-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
+
+#zoom-level {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-left: auto;
+}
+
+.timeline-wrapper {
+    flex: 1;
+    position: relative;
+    overflow-x: auto;
+    overflow-y: hidden;
+}
+
+/* Шкала времени */
+.time-ruler {
+    height: 24px;
+    background: var(--ruler-bg);
+    position: relative;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+}
+
+.ruler-mark {
+    position: absolute;
+    top: 0;
+    height: 100%;
+    border-left: 1px solid var(--border);
+    font-size: 9px;
+    color: var(--text-muted);
+    padding-left: 3px;
+    padding-top: 2px;
+    user-select: none;
+}
+
+.ruler-mark.major {
+    border-left-color: var(--text-secondary);
+    color: var(--text-secondary);
+    font-weight: 600;
+}
+
+/* Полоса воспроизведения (playhead) */
+.playhead {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: var(--playhead-color);
+    z-index: 100;
+    pointer-events: none;
+    left: 0;
+    transition: left 0.05s linear;
+}
+
+.playhead::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -5px;
+    width: 12px;
+    height: 12px;
+    background: var(--playhead-color);
+    clip-path: polygon(50% 100%, 0 0, 100% 0);
+}
+
+/* Дорожки */
+.tracks-container {
+    position: relative;
+}
+
+.track {
+    display: flex;
+    min-height: 50px;
+    border-bottom: 1px solid var(--border);
+}
+
+.track-label {
+    width: 80px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 10px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    background: var(--bg-dark);
+    border-right: 1px solid var(--border);
+}
+
+.track-content {
+    flex: 1;
+    position: relative;
+    background: var(--track-bg);
+    min-height: 50px;
+}
+
+/* ─── Маркеры на таймлайне ───────────────────────────────────────────── */
+
+.marker {
+    position: absolute;
+    top: 6px;
+    height: 38px;
+    background: var(--marker-color);
+    border-radius: 4px;
+    cursor: grab;
+    display: flex;
+    align-items: center;
+    padding: 0 8px;
+    font-size: 11px;
+    color: white;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    user-select: none;
+    transition: box-shadow var(--transition), transform 0.1s;
+    min-width: 30px;
+}
+
+.marker:hover {
+    box-shadow: 0 0 8px rgba(233, 69, 96, 0.5);
+    transform: translateY(-1px);
+}
+
+.marker.selected {
+    background: var(--marker-selected);
+    box-shadow: 0 0 12px rgba(255, 107, 129, 0.7);
+    z-index: 10;
+}
+
+.marker.has-audio {
+    background: var(--accent-green);
+}
+
+.marker.has-audio.selected {
+    background: #27ae60;
+    box-shadow: 0 0 12px rgba(46, 204, 113, 0.7);
+}
+
+.marker.dragging {
+    cursor: grabbing;
+    opacity: 0.8;
+    z-index: 20;
+}
+
+/* Ручка для ресайза маркера */
+.marker-resize-handle {
+    position: absolute;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    width: 6px;
+    cursor: ew-resize;
+    background: rgba(255,255,255,0.2);
+    border-radius: 0 4px 4px 0;
+}
+
+.marker-resize-handle:hover {
+    background: rgba(255,255,255,0.4);
+}
+
+/* ─── Модальные окна ─────────────────────────────────────────────────── */
+
+.modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+}
+
+.modal[hidden] {
+    display: none;
+}
+
+.modal-content {
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px;
+    min-width: 300px;
+    max-width: 500px;
+    max-height: 60vh;
+    overflow-y: auto;
+    box-shadow: var(--shadow);
+}
+
+.modal-content h3 {
+    margin-bottom: 12px;
+    color: var(--text-primary);
+}
+
+.projects-list {
+    max-height: 300px;
+    overflow-y: auto;
+}
+
+.project-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 6px;
+    cursor: pointer;
+    transition: all var(--transition);
+}
+
+.project-item:hover {
+    border-color: var(--accent-blue);
+    background: rgba(52, 152, 219, 0.1);
+}
+
+.project-item .name {
+    font-size: 13px;
+}
+
+.project-item .date {
+    font-size: 10px;
+    color: var(--text-muted);
+}
+
+.btn-close-modal {
+    margin-top: 12px;
+    width: 100%;
+}
+
+/* ─── Уведомления ────────────────────────────────────────────────────── */
+
+.notifications {
+    position: fixed;
+    top: 56px;
+    right: 16px;
+    z-index: 2000;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.notification {
+    padding: 10px 16px;
+    border-radius: var(--radius);
+    font-size: 12px;
+    animation: slideIn 0.3s ease;
+    box-shadow: var(--shadow);
+    max-width: 300px;
+}
+
+.notification.info {
+    background: var(--accent-blue);
+    color: white;
+}
+
+.notification.success {
+    background: var(--accent-green);
+    color: white;
+}
+
+.notification.error {
+    background: var(--accent);
+    color: white;
+}
+
+@keyframes slideIn {
+    from { transform: translateX(100%); opacity: 0; }
+    to { transform: translateX(0); opacity: 1; }
+}
+
+/* ─── Скроллбар ──────────────────────────────────────────────────────── */
+
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: var(--bg-dark);
+}
+
+::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: var(--text-muted);
+}
+
+/* ─── Адаптив ────────────────────────────────────────────────────────── */
+
+@media (max-width: 900px) {
+    .workspace {
+        flex-direction: column;
+    }
+    .properties-panel {
+        width: 100%;
+        border-left: none;
+        border-top: 1px solid var(--border);
+        max-height: 200px;
+    }
+}

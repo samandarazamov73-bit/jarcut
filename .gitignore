@@ -1,0 +1,16 @@
+# Секреты
+.env
+
+# Загруженные файлы (могут быть большими)
+uploads/
+exports/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
