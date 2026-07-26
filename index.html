@@ -15,9 +15,10 @@ button,select,textarea,input{font:inherit}.btn{border:0;border-radius:9px;paddin
 .section-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:11px}.section-head h2{font-size:14px}.count{font-size:11px;color:var(--muted)}
 .speakers{display:grid;grid-template-columns:repeat(auto-fit,minmax(245px,1fr));gap:8px}.speaker{border:1px solid var(--line);background:var(--card2);border-radius:10px;padding:10px}.speaker-top{display:flex;align-items:center;gap:7px;margin-bottom:7px}.speaker-color{width:10px;height:10px;border-radius:50%}.speaker-name{font-size:12px;font-weight:700}.speaker-desc{font-size:10px;color:var(--muted);margin-left:auto;max-width:120px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.speaker select{width:100%;padding:7px 9px;font-size:11px}
 .phrase{display:grid;grid-template-columns:45px minmax(0,1fr) auto;gap:9px;border-top:1px solid #222630;padding:11px 0}.phrase:first-child{border-top:0}.time{font-size:10px;color:var(--muted);padding-top:7px;cursor:pointer;font-variant-numeric:tabular-nums}.time:hover{color:#b7a7ff}.speaker-badge{display:inline-block;border-radius:999px;padding:2px 7px;font-size:9px;font-weight:750;color:#fff;margin-bottom:5px}.original{font-size:10px;color:#686f7d;font-style:italic;margin-bottom:5px}.phrase textarea{width:100%;resize:vertical;min-height:38px;border:1px solid #2e3340;border-radius:8px;background:#191c23;color:var(--text);padding:8px 9px;font-size:13px;line-height:1.35}.phrase-actions{display:flex;flex-direction:column;gap:5px;align-items:center}.state{font-size:14px}audio{width:100%;height:29px;margin-top:6px}
+.clip-position{display:grid;grid-template-columns:auto auto minmax(90px,1fr) 72px auto auto;gap:6px;align-items:center;margin-top:7px;padding:7px 8px;border:1px solid #292e3a;border-radius:8px;background:#171a21}.clip-position label{font-size:10px;color:var(--muted);white-space:nowrap}.clip-position input[type=range]{width:100%;accent-color:var(--purple);cursor:ew-resize}.clip-position input[type=number]{width:72px;padding:5px 6px;border:1px solid #343946;border-radius:6px;background:#11141a;color:var(--text);font-size:11px;font-variant-numeric:tabular-nums}.nudge{padding:5px 7px;min-width:0}.reset-position{color:#b7a7ff}
 .volume{display:grid;grid-template-columns:auto 1fr 42px;gap:10px;align-items:center}.volume input{accent-color:var(--purple)}.percent{font-size:12px;color:var(--muted);text-align:right}.download{color:#89e5be;font-weight:750;text-decoration:none}.download:hover{text-decoration:underline}
 .toasts{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);z-index:20;display:flex;flex-direction:column;gap:7px}.toast{border-radius:9px;padding:10px 15px;font-size:12px;box-shadow:0 8px 26px #0008;animation:up .2s}.toast.info{background:#31285f}.toast.ok{background:#096544}.toast.err{background:#842b35}@keyframes up{from{opacity:0;transform:translateY(12px)}}
-@media(max-width:720px){body{padding:14px 10px 45px}.top{align-items:flex-start;flex-wrap:wrap}.api{margin-left:0}.controls{grid-template-columns:1fr}.label{margin-top:3px}.speaker-desc{max-width:90px}.phrase{grid-template-columns:38px minmax(0,1fr)}.phrase-actions{grid-column:2;flex-direction:row}.volume{grid-template-columns:1fr 42px}.volume .label{grid-column:1/-1}}
+@media(max-width:720px){body{padding:14px 10px 45px}.top{align-items:flex-start;flex-wrap:wrap}.api{margin-left:0}.controls{grid-template-columns:1fr}.label{margin-top:3px}.speaker-desc{max-width:90px}.phrase{grid-template-columns:38px minmax(0,1fr)}.phrase-actions{grid-column:2;flex-direction:row}.clip-position{grid-template-columns:52px minmax(70px,1fr) 52px 42px}.clip-position label{grid-column:1/-1;grid-row:1}.clip-position input[type=range]{grid-column:1/-1;grid-row:2;min-height:28px}.clip-position button:nth-of-type(1){grid-column:1;grid-row:3}.clip-position input[type=number]{grid-column:2;grid-row:3;width:100%;min-height:34px}.clip-position button:nth-of-type(2){grid-column:3;grid-row:3}.clip-position button:nth-of-type(3){grid-column:4;grid-row:3}.clip-position .nudge{min-height:34px}.volume{grid-template-columns:1fr 42px}.volume .label{grid-column:1/-1}}
 </style>
 </head>
 <body>
@@ -80,6 +81,7 @@ const video=$('video');
 const COLORS=['#7c5cff','#e85d9e','#23a9e8','#e39b36','#1eb987','#e46555','#8c6be8','#69a94b'];
 const VOICES=['Kore','Puck','Charon','Fenrir','Aoede','Leda','Orus','Zephyr','Callirrhoe','Autonoe','Enceladus','Iapetus','Umbriel','Algieba','Despina','Erinome','Algenib','Rasalgethi','Laomedeia','Achernar','Alnilam','Schedar','Gacrux','Pulcherrima','Achird','Zubenelgenubi','Vindemiatrix','Sadachbia','Sadaltager','Sulafat'];
 const fmt=s=>`${Math.floor((s||0)/60)}:${String(Math.floor((s||0)%60)).padStart(2,'0')}`;
+const fmtExact=s=>{const ticks=Math.max(0,Math.round((s||0)*100));return`${Math.floor(ticks/6000)}:${String(((ticks%6000)/100).toFixed(2)).padStart(5,'0')}`};
 const esc=s=>(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 function toast(type,text){const el=document.createElement('div');el.className='toast '+type;el.textContent=text;$('toasts').appendChild(el);setTimeout(()=>{el.style.opacity=0;el.style.transition='.25s';setTimeout(()=>el.remove(),250)},4000)}
 function errorInfo(payload){let d=payload?.detail??payload??{};if(typeof d==='string')return{message:d,help:[]};return{message:d.message||d.error||'Неизвестная ошибка',help:d.help||[]}}
@@ -121,7 +123,7 @@ async function upload(file){toast('info','Загрузка видео…');const
 $('dub').onclick=dub;
 async function dub(){if(!S.file)return;const runId=++S.runId;resetDubbingAudio();S.speakers=[];S.segments=[];$('dub').disabled=true;$('progress').hidden=false;$('progress-fill').style.width='12%';showStatus('work','Распознаю всех людей, перевожу и разделяю реплики…',true);
   try{const r=await fetch('/api/translate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filename:S.file,lang:$('language').value})});const d=await r.json();if(!r.ok)throw errorInfo(d);if(runId!==S.runId)return;
-    S.speakers=d.speakers||[];S.segments=(d.segments||[]).map((x,i)=>({id:'seg'+i,start:+x.start||0,end:+x.end||(+x.start||0)+2,speaker_id:x.speaker_id||'S1',original:x.original||'',text:x.translated||'',emotion:x.emotion||'neutral',audio:null,url:null,state:'wait',revision:0}));
+    S.speakers=d.speakers||[];S.segments=(d.segments||[]).map((x,i)=>{const start=+x.start||0,end=Math.max(start+.2,+x.end||start+2);return{id:'seg'+i,start,end,sourceStart:start,sourceEnd:end,speaker_id:x.speaker_id||'S1',original:x.original||'',text:x.translated||'',emotion:x.emotion||'neutral',audio:null,url:null,state:'wait',revision:0}});
     if(!S.segments.length)throw{message:'В видео не найдена речь',help:[]};
     $('progress-fill').style.width='35%';renderSpeakers();renderPhrases();$('speakers-card').hidden=false;$('phrases-card').hidden=false;const shortened=d.lengthAdjusted?`, сокращено длинных реплик: ${d.lengthAdjusted}`:'';toast('ok',`Найдено спикеров: ${S.speakers.length}, реплик: ${S.segments.length}${shortened}`);await voiceSegments(S.segments,35);$('export-card').hidden=false;
   }catch(err){const info=err.message?err:errorInfo(err);showStatus('err','Дубляж не запущен: '+info.message,false,info.help||[]);toast('err',info.message||'Дубляж не запущен');}
@@ -136,9 +138,36 @@ function changeVoice(id,voice){
   renderPhrases();toast('info',`${sp.label}: выбран ${voice}. Реплики нужно переозвучить`)
 }
 
-function renderPhrases(){$('phrase-count').textContent=`${S.segments.filter(x=>x.state==='ok').length}/${S.segments.length} готово`;$('phrases').innerHTML=S.segments.map(x=>{const sp=speaker(x.speaker_id),color=colorFor(x.speaker_id);return`<div class="phrase"><span class="time" onclick="jump(${x.start})">${fmt(x.start)}</span><div><span class="speaker-badge" style="background:${color}">${esc(sp.label||sp.id)} · ${esc(sp.voice)}</span>${x.original?`<div class="original">${esc(x.original)}</div>`:''}<textarea rows="1" oninput="editText('${x.id}',this.value)">${esc(x.text)}</textarea>${x.url?`<audio controls src="${x.url}"></audio>`:''}</div><div class="phrase-actions"><span class="state" id="state-${x.id}">${stateIcon(x.state)}</span><button class="btn btn-soft btn-small" onclick="voiceOne('${x.id}')">Озвучить</button></div></div>`}).join('')}
+function positionLimit(seg){
+  const duration=Math.max(.2,seg.end-seg.start),mediaDuration=Number.isFinite(video.duration)?video.duration:S.duration;
+  return Math.max(0,mediaDuration>0?mediaDuration-duration:seg.start);
+}
+function renderPhrases(){
+  $('phrase-count').textContent=`${S.segments.filter(x=>x.state==='ok').length}/${S.segments.length} готово`;
+  $('phrases').innerHTML=S.segments.map(x=>{
+    const sp=speaker(x.speaker_id),color=colorFor(x.speaker_id),limit=positionLimit(x);
+    const moved=Math.abs(x.start-(x.sourceStart??x.start))>.001;
+    return`<div class="phrase"><span class="time" id="time-${x.id}" onclick="previewSegment('${x.id}')" title="Воспроизвести с этой позиции">${fmtExact(x.start)}</span><div><span class="speaker-badge" style="background:${color}">${esc(sp.label||sp.id)} · ${esc(sp.voice)}</span>${x.original?`<div class="original">${esc(x.original)}</div>`:''}<textarea rows="1" oninput="editText('${x.id}',this.value)">${esc(x.text)}</textarea>${x.url?`<audio controls src="${x.url}"></audio>`:''}<div class="clip-position"><label for="position-${x.id}">Положение готового голоса</label><button class="btn btn-soft nudge" onclick="shiftSegment('${x.id}',-.1)" title="На 0,1 секунды раньше">−0.1</button><input id="position-${x.id}" type="range" min="0" max="${limit.toFixed(2)}" step="0.05" value="${x.start.toFixed(2)}" oninput="moveSegment('${x.id}',this.value)" title="Перетащите голос в нужное место"><input id="position-number-${x.id}" type="number" min="0" max="${limit.toFixed(2)}" step="0.05" value="${x.start.toFixed(2)}" oninput="moveSegment('${x.id}',this.value)" onblur="moveSegment('${x.id}',this.value,true)" aria-label="Начало реплики в секундах"><button class="btn btn-soft nudge" onclick="shiftSegment('${x.id}',.1)" title="На 0,1 секунды позже">+0.1</button><button id="position-reset-${x.id}" class="btn btn-soft nudge reset-position" onclick="resetSegmentPosition('${x.id}')" title="Вернуть исходный таймкод" ${moved?'':'disabled'}>↺</button></div></div><div class="phrase-actions"><span class="state" id="state-${x.id}">${stateIcon(x.state)}</span><button class="btn btn-soft btn-small" onclick="voiceOne('${x.id}')">Озвучить</button></div></div>`
+  }).join('')
+}
 const stateIcon=s=>s==='ok'?'✅':s==='error'?'❌':s==='work'?'⏳':'○';
 function editText(id,value){const seg=S.segments.find(x=>x.id===id);if(seg&&seg.text!==value){seg.text=value;seg.revision=(seg.revision||0)+1;stopAudio(seg.id);delete buffers[seg.id];seg.audio=null;seg.url=null;seg.state='wait';const el=$('state-'+id);if(el)el.textContent='○'}}
+function moveSegment(id,value,commit=false){
+  const seg=S.segments.find(x=>x.id===id);if(!seg)return;
+  const duration=Math.max(.2,seg.end-seg.start),limit=positionLimit(seg),raw=String(value??'').trim(),parsed=Number(raw);
+  const number=$('position-number-'+id);
+  if(!raw||!Number.isFinite(parsed)){if(commit&&number)number.value=seg.start.toFixed(2);return}
+  const next=Math.round(Math.max(0,Math.min(parsed,limit))*1000)/1000,wasClamped=Math.abs(next-parsed)>.0005;
+  stopAudio(id);completedSources.delete(id);seg.start=next;seg.end=next+duration;
+  if(buffers[id]){buffers[id].start=seg.start;buffers[id].end=seg.end}
+  const time=$('time-'+id),range=$('position-'+id),reset=$('position-reset-'+id);
+  if(time)time.textContent=fmtExact(seg.start);if(range)range.value=seg.start.toFixed(2);if(number&&(number!==document.activeElement||commit||wasClamped))number.value=seg.start.toFixed(2);
+  if(reset)reset.disabled=Math.abs(seg.start-(seg.sourceStart??seg.start))<=.001;
+  syncDubbingAudioNow();
+}
+function shiftSegment(id,delta){const seg=S.segments.find(x=>x.id===id);if(seg)moveSegment(id,seg.start+delta)}
+function resetSegmentPosition(id){const seg=S.segments.find(x=>x.id===id);if(seg)moveSegment(id,seg.sourceStart??0)}
+function previewSegment(id){const seg=S.segments.find(x=>x.id===id);if(seg){completedSources.delete(id);video.currentTime=seg.start;video.play()}}
 function jump(time){video.currentTime=time;video.play()}
 
 async function voiceRequest(seg){const sp=speaker(seg.speaker_id);const r=await fetch('/api/voice',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({segments:[{id:seg.id,text:seg.text,voice:sp.voice,delivery:sp.delivery,emotion:seg.emotion,duration:Math.max(.4,seg.end-seg.start)}]})});const d=await r.json();if(!r.ok)throw errorInfo(d);return d.results?.[0]||{ok:false,error:{message:'Пустой ответ'}}}
