@@ -343,18 +343,72 @@ def extract_audio(source: Path, target: Path) -> bool:
 
 
 def _mark_overlap_segments(segments: list[dict[str, Any]]) -> None:
-    """Mark meaningful cross-speaker overlap while ignoring timestamp rounding noise."""
+    """Mark Gemini overlap and group it for optional Whisper disambiguation."""
+    count = len(segments)
+    parents = list(range(count))
+
+    def root(index: int) -> int:
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        left_root, right_root = root(left), root(right)
+        if left_root != right_root:
+            parents[right_root] = left_root
+
+    overlap_pairs: list[tuple[int, int]] = []
+    for segment in segments:
+        segment["is_overlap"] = False
+        segment["gemini_overlap_candidate"] = False
+
     for index, segment in enumerate(segments):
         start = float(segment.get("start", 0))
         end = float(segment.get("end", start))
         speaker_id = str(segment.get("speaker_id", ""))
-        segment["is_overlap"] = any(
-            other_index != index
-            and str(other.get("speaker_id", "")) != speaker_id
-            and min(end, float(other.get("end", 0)))
-            - max(start, float(other.get("start", 0))) >= 0.08
-            for other_index, other in enumerate(segments)
+        for other_index in range(index + 1, count):
+            other = segments[other_index]
+            if str(other.get("speaker_id", "")) == speaker_id:
+                continue
+            overlap = min(end, float(other.get("end", 0))) - max(
+                start, float(other.get("start", 0))
+            )
+            if overlap >= 0.08:
+                segment["is_overlap"] = True
+                other["is_overlap"] = True
+                overlap_pairs.append((index, other_index))
+                union(index, other_index)
+
+    groups: dict[int, list[int]] = {}
+    involved = {index for pair in overlap_pairs for index in pair}
+    for index in involved:
+        groups.setdefault(root(index), []).append(index)
+
+    for group_number, indices in enumerate(
+        sorted(groups.values(), key=lambda items: min(items))
+    ):
+        ordered = sorted(
+            indices,
+            key=lambda item: (
+                float(segments[item].get("start", 0)),
+                float(segments[item].get("end", 0)),
+            ),
         )
+        window_start = max(
+            0.0, min(float(segments[item].get("start", 0)) for item in ordered) - 0.6
+        )
+        window_end = max(float(segments[item].get("end", 0)) for item in ordered) + 0.6
+        for position, index in enumerate(ordered):
+            segment = segments[index]
+            segment.update({
+                "gemini_overlap_candidate": True,
+                "gemini_overlap_group_id": group_number,
+                "transition_window_start": round(window_start, 3),
+                "transition_window_end": round(window_end, 3),
+                "speaker_transition_detected": position > 0,
+                "speaker_transition_reference": position + 1 < len(ordered),
+            })
 
 
 def run_silero_vad(source: Path) -> tuple[Any | None, list[dict[str, float]], str | None]:
@@ -667,13 +721,22 @@ def _normalize_words(text: str) -> list[str]:
 def merge_alignment_windows(segments: list[dict[str, Any]], precise_all: bool = False) -> list[dict[str, Any]]:
     candidates = [
         segment for segment in segments
-        if not segment.get("is_overlap")
-        and (precise_all or float(segment.get("alignment_confidence", 0)) < ALIGNMENT_LOW_CONFIDENCE)
+        if segment.get("gemini_overlap_candidate")
+        or (
+            not segment.get("is_overlap")
+            and (
+                precise_all
+                or float(segment.get("alignment_confidence", 0)) < ALIGNMENT_LOW_CONFIDENCE
+            )
+        )
     ]
     candidates.sort(key=lambda item: item["gemini_start"])
     windows: list[dict[str, Any]] = []
     for segment in candidates:
-        if segment.get("shared_vad_cross_speaker"):
+        if segment.get("gemini_overlap_candidate"):
+            start = max(0.0, float(segment.get("transition_window_start", segment["gemini_start"] - 0.6)))
+            end = float(segment.get("transition_window_end", segment["gemini_end"] + 0.6))
+        elif segment.get("shared_vad_cross_speaker"):
             start = max(0.0, float(segment.get("matched_vad_start", segment["gemini_start"])) - 0.3)
             end = float(segment.get("matched_vad_end", segment["gemini_end"])) + 0.3
         else:
@@ -726,12 +789,13 @@ def run_whisper_for_windows(source: Path, windows: list[dict[str, Any]]) -> list
         for word in item.words or []:
             normalized = _normalize_words(word.word)
             if normalized:
-                words.append({
-                    "word": normalized[0],
-                    "start": float(word.start),
-                    "end": float(word.end),
-                    "probability": float(word.probability or 0),
-                })
+                for token in normalized:
+                    words.append({
+                        "word": token,
+                        "start": float(word.start),
+                        "end": float(word.end),
+                        "probability": float(word.probability or 0),
+                    })
     words.sort(key=lambda item: (item["start"], item["end"]))
     for index, word in enumerate(words):
         word["index"] = index
@@ -776,7 +840,11 @@ def _word_span_candidates(
     target_text = " ".join(target)
     expected_start = float(segment["gemini_start"])
     matches: list[dict[str, Any]] = []
-    min_length, max_length = max(1, len(target) - 3), len(target) + 4
+    # Short turns need tight length bounds so a candidate cannot absorb the
+    # previous speaker's trailing words. Longer phrases tolerate proportional
+    # omissions from Whisper without opening an excessively wide window.
+    slack = 1 if len(target) <= 4 else max(2, math.ceil(len(target) * 0.25))
+    min_length, max_length = max(1, len(target) - slack), len(target) + slack
     for start_index in range(len(candidates)):
         for length in range(min_length, max_length + 1):
             chosen = candidates[start_index:start_index + length]
@@ -792,10 +860,19 @@ def _word_span_candidates(
             proximity = max(0.0, 1.0 - abs(chosen_words[0]["start"] - expected_start) / 1.5)
             probability = sum(word["probability"] for word in chosen_words) / len(chosen_words)
             score = 0.70 * similarity + 0.15 * proximity + 0.15 * probability
+            first_token_similarity = difflib.SequenceMatcher(
+                None, target[0], chosen_words[0]["word"]
+            ).ratio()
+            last_token_similarity = difflib.SequenceMatcher(
+                None, target[-1], chosen_words[-1]["word"]
+            ).ratio()
             candidate = {
                 "score": score,
                 "text_similarity": similarity,
+                "first_token_similarity": first_token_similarity,
+                "last_token_similarity": last_token_similarity,
                 "probability": probability,
+                "length_ratio": min(len(target), len(chosen_words)) / max(len(target), len(chosen_words)),
                 "start": float(chosen_words[0]["start"]),
                 "end": float(chosen_words[-1]["end"]),
                 "start_index": indices[0],
@@ -845,6 +922,7 @@ TRANSITION_MIN_WORD_PROBABILITY = 0.55
 TRANSITION_MAX_ADVANCE_SECONDS = 0.15
 TRANSITION_MAX_DELAY_SECONDS = 1.0
 TRANSITION_SAFETY_MARGIN_SECONDS = 0.04
+TRANSITION_TRUE_OVERLAP_SECONDS = 0.10
 
 
 def _select_ordered_transition_spans(
@@ -867,6 +945,9 @@ def _select_ordered_transition_spans(
             if (
                 match["text_similarity"] < TRANSITION_MIN_TEXT_SIMILARITY
                 or match["probability"] < TRANSITION_MIN_WORD_PROBABILITY
+                or match["length_ratio"] < 0.75
+                or match["first_token_similarity"] < 0.60
+                or match["last_token_similarity"] < 0.60
             ):
                 continue
             key = (int(match["start_index"]), int(match["end_index"]))
@@ -911,18 +992,26 @@ def _select_ordered_transition_spans(
 def refine_speaker_transitions(
     segments: list[dict[str, Any]], words: list[dict[str, Any]]
 ) -> int:
-    """Anchor cross-speaker turns in shared VAD regions without moving the prior line."""
-    groups: dict[int, list[dict[str, Any]]] = {}
+    """Anchor uncertain cross-speaker turns without moving the prior line."""
+    groups: dict[tuple[str, int], list[dict[str, Any]]] = {}
     for segment in segments:
         region_id = segment.get("matched_vad_region_id")
+        overlap_group_id = segment.get("gemini_overlap_group_id")
         if segment.get("shared_vad_cross_speaker") and isinstance(region_id, int):
-            groups.setdefault(region_id, []).append(segment)
+            groups.setdefault(("vad", region_id), []).append(segment)
+        elif segment.get("gemini_overlap_candidate") and isinstance(overlap_group_id, int):
+            groups.setdefault(("gemini_overlap", overlap_group_id), []).append(segment)
 
     refined = 0
-    for group in groups.values():
+    for group_key, group in groups.items():
+        is_gemini_overlap_group = group_key[0] == "gemini_overlap"
         group.sort(key=lambda item: (float(item["gemini_start"]), float(item["gemini_end"])))
-        region_start = min(float(item["matched_vad_start"]) for item in group) - 0.3
-        region_end = max(float(item["matched_vad_end"]) for item in group) + 0.3
+        if is_gemini_overlap_group:
+            region_start = min(float(item["transition_window_start"]) for item in group)
+            region_end = max(float(item["transition_window_end"]) for item in group)
+        else:
+            region_start = min(float(item["matched_vad_start"]) for item in group) - 0.3
+            region_end = max(float(item["matched_vad_end"]) for item in group) + 0.3
         selected = _select_ordered_transition_spans(
             group, words, region_start=region_start, region_end=region_end
         )
@@ -941,6 +1030,27 @@ def refine_speaker_transitions(
                     "alignment_confidence": 0.0,
                     "alignment_warning": "speaker_boundary_not_found_low_confidence",
                     "boundary_source": "gemini_fallback",
+                    "overlap_resolution": (
+                        "unverified_preserved" if is_gemini_overlap_group else None
+                    ),
+                })
+                continue
+
+            if (
+                is_gemini_overlap_group
+                and float(previous_span["end"]) - float(current_span["start"])
+                >= TRANSITION_TRUE_OVERLAP_SECONDS
+            ):
+                current.update({
+                    "auto_start": float(current["gemini_start"]),
+                    "auto_end": float(current["gemini_end"]),
+                    "alignment_method": "whisper_confirmed_overlap",
+                    "alignment_confidence": round(min(
+                        float(previous_span["score"]), float(current_span["score"])
+                    ), 3),
+                    "alignment_warning": "true_overlap_preserved",
+                    "boundary_source": "overlapping_whisper_word_spans",
+                    "overlap_resolution": "confirmed_preserved",
                 })
                 continue
 
@@ -955,9 +1065,15 @@ def refine_speaker_transitions(
                     "alignment_confidence": 0.3,
                     "alignment_warning": "whisper_start_too_early_vs_gemini",
                     "boundary_source": "gemini_fallback",
+                    "overlap_resolution": (
+                        "unverified_preserved" if is_gemini_overlap_group else None
+                    ),
                 })
                 continue
-            if anchored_start > gemini_start + TRANSITION_MAX_DELAY_SECONDS:
+            if (
+                not is_gemini_overlap_group
+                and anchored_start > gemini_start + TRANSITION_MAX_DELAY_SECONDS
+            ):
                 current.update({
                     "auto_start": gemini_start,
                     "auto_end": float(current["gemini_end"]),
@@ -985,6 +1101,9 @@ def refine_speaker_transitions(
                 "next_reference_word_start": round(float(current_span["start"]), 3),
                 "previous_text_similarity": round(float(previous_span["text_similarity"]), 3),
                 "next_text_similarity": round(float(current_span["text_similarity"]), 3),
+                "overlap_resolution": (
+                    "ordered_non_overlap" if is_gemini_overlap_group else None
+                ),
             })
             refined += 1
     return refined
@@ -1000,6 +1119,7 @@ def refine_segments_with_whisper(
             segment for segment in segments
             if not segment.get("is_overlap")
             and not segment.get("shared_vad_cross_speaker")
+            and not segment.get("gemini_overlap_candidate")
             and (
                 precise_all
                 or float(segment.get("alignment_confidence", 0)) < ALIGNMENT_LOW_CONFIDENCE
