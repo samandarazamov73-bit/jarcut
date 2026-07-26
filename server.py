@@ -26,6 +26,16 @@ from fastapi.staticfiles import StaticFiles
 
 load_dotenv()
 
+
+def bounded_env_seconds(name: str, default: float, minimum: float, maximum: float) -> float:
+    """Read a timeout setting without allowing invalid values to break startup."""
+    try:
+        value = float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(value, maximum))
+
+
 # Vertex AI credentials. GEMINI_API_KEY remains a backward-compatible alias so
 # existing local .env files keep working when that value is actually a Vertex key.
 API_KEY = (os.getenv("VERTEX_API_KEY") or os.getenv("GEMINI_API_KEY", "")).strip()
@@ -43,6 +53,9 @@ TTS_MODEL = os.getenv(
 ALIGNMENT_MODE = os.getenv("ALIGNMENT_MODE", "hybrid").strip().lower()
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small").strip() or "small"
 ALIGNMENT_LOW_CONFIDENCE = 0.45
+VERTEX_TRANSCRIBE_TIMEOUT_SECONDS = bounded_env_seconds(
+    "VERTEX_TRANSCRIBE_TIMEOUT_SECONDS", 240.0, 60.0, 600.0
+)
 
 BASE = Path(__file__).resolve().parent
 UPLOADS = BASE / "uploads"
@@ -139,6 +152,7 @@ def vertex_public_config() -> dict[str, Any]:
         "location": VERTEX_LOCATION if resolved_vertex_mode() == "standard" else "global",
         "transcribeModel": TRANSCRIBE_MODEL,
         "ttsModel": TTS_MODEL,
+        "transcribeTimeoutSeconds": VERTEX_TRANSCRIBE_TIMEOUT_SECONDS,
         "alignmentMode": alignment_mode,
         "alignmentAvailable": alignment_mode == "off" or alignment_dependency_available,
         "alignmentDependencyAvailable": alignment_dependency_available,
@@ -1098,12 +1112,49 @@ async def translate(request: Request) -> dict[str, Any]:
             ) from exc
 
         try:
-            async with httpx.AsyncClient(timeout=600) as client:
+            timeout = httpx.Timeout(
+                connect=30.0,
+                read=VERTEX_TRANSCRIBE_TIMEOUT_SECONDS,
+                write=120.0,
+                pool=30.0,
+            )
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.post(
                     endpoint,
                     headers=vertex_headers(),
                     json=payload,
                 )
+        except httpx.ReadTimeout as exc:
+            timeout_minutes = VERTEX_TRANSCRIBE_TIMEOUT_SECONDS / 60
+            raise HTTPException(
+                504,
+                {
+                    "code": "VERTEX_TIMEOUT",
+                    "message": (
+                        "Vertex AI не завершил распознавание вовремя "
+                        f"(лимит ожидания ответа {timeout_minutes:g} мин.)."
+                    ),
+                    "help": [
+                        "Повторите попытку: временная задержка Vertex AI обычно проходит.",
+                        "Если видео длинное, разделите его на более короткие части.",
+                        "При необходимости измените VERTEX_TRANSCRIBE_TIMEOUT_SECONDS в .env (60–600).",
+                    ],
+                    "retryable": True,
+                },
+            ) from exc
+        except httpx.TimeoutException as exc:
+            raise HTTPException(
+                504,
+                {
+                    "code": "VERTEX_TIMEOUT",
+                    "message": "Истекло время подключения к Vertex AI или отправки аудио.",
+                    "help": [
+                        "Проверьте интернет, VPN/прокси и повторите попытку.",
+                        "Если видео длинное, разделите его на более короткие части.",
+                    ],
+                    "retryable": True,
+                },
+            ) from exc
         except httpx.RequestError as exc:
             raise HTTPException(
                 502,
@@ -1501,7 +1552,7 @@ if __name__ == "__main__":
     print(f"Режим Vertex: {config['mode']}")
     if config["mode"] == "standard":
         print(f"Проект/регион: {config['project']} / {config['location']}")
-    print(f"Распознавание: {TRANSCRIBE_MODEL}")
+    print(f"Распознавание: {TRANSCRIBE_MODEL} (таймаут {VERTEX_TRANSCRIBE_TIMEOUT_SECONDS:g} сек.)")
     print(f"Озвучка: {TTS_MODEL}")
     alignment_status = config["alignmentMode"] if config["alignmentAvailable"] else "недоступна (установите faster-whisper)"
     if config["alignmentAvailable"] and config["alignmentMode"] in {"hybrid", "precise"}:

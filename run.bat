@@ -15,6 +15,7 @@ if not exist .env (
         echo VERTEX_MODE=express
         echo VERTEX_PROJECT_ID=
         echo VERTEX_LOCATION=global
+        echo VERTEX_TRANSCRIBE_TIMEOUT_SECONDS=240
         echo ALIGNMENT_MODE=hybrid
         echo WHISPER_MODEL=small
     )> .env
