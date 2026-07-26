@@ -76,27 +76,65 @@ def gemini_headers() -> dict[str, str]:
 
 
 def api_error(response: httpx.Response, action: str) -> HTTPException:
-    """Translate Gemini errors to short, actionable messages without exposing the key."""
+    """Translate Gemini errors to actionable messages without exposing the key."""
     try:
         payload = response.json()
-        message = payload.get("error", {}).get("message", response.text[:300])
+        error = payload.get("error", {})
+        message = error.get("message", response.text[:300])
+        reasons = [
+            str(item.get("reason", ""))
+            for item in error.get("details", [])
+            if isinstance(item, dict)
+        ]
     except Exception:
         message = response.text[:300]
+        reasons = []
 
     if response.status_code == 403:
-        detail = {
-            "code": "GEMINI_KEY_BLOCKED",
-            "message": f"Gemini запретил запрос: {message}",
-            "help": [
-                "Откройте Google Cloud Console → APIs & Services → Credentials.",
-                "Выберите ваш API key → API restrictions → Restrict key.",
-                "Разрешите Generative Language API и сохраните изменения.",
-                "Если ключ из AI Studio всё равно заблокирован — создайте новый ключ в новом Google Cloud проекте с включённым billing.",
-                "Перезапустите run.bat после изменения .env.",
-            ],
-            "action": action,
-        }
-        return HTTPException(status_code=403, detail=detail)
+        service_blocked = (
+            "API_KEY_SERVICE_BLOCKED" in reasons
+            or "Requests to this API" in message
+            or "are blocked" in message
+        )
+        if service_blocked:
+            help_steps = [
+                "Откройте https://console.cloud.google.com/apis/library/generativelanguage.googleapis.com и выберите тот же проект, где создан ключ.",
+                "Нажмите Enable для Generative Language API, если API ещё не включён.",
+                "Откройте APIs & Services → Credentials → ваш API key.",
+                "В API restrictions выберите Restrict key и разрешите Generative Language API.",
+                "Для локального Python-сервера не используйте ограничение Website/HTTP referrers; после сохранения подождите несколько минут.",
+                "После изменения ключа в .env перезапустите python server.py (или run.bat).",
+                "Если проект управляется организацией или Workspace и блокировка остаётся — создайте личный Google Cloud проект и новый ключ.",
+            ]
+            code = "API_KEY_SERVICE_BLOCKED"
+        else:
+            help_steps = [
+                "Проверьте, что ключ создан в Google AI Studio или Google Cloud проекте с включённым Gemini API.",
+                "Проверьте billing и доступ Preview-моделей для выбранного проекта и региона.",
+                "Если Google сообщает, что проекту отказано в доступе, создайте новый личный Cloud-проект или обратитесь в Google Cloud Support.",
+            ]
+            code = "GEMINI_PERMISSION_DENIED"
+        return HTTPException(
+            status_code=403,
+            detail={
+                "code": code,
+                "message": f"Gemini запретил {action}: {message}",
+                "help": help_steps,
+                "action": action,
+                "reasons": reasons,
+            },
+        )
+
+    if response.status_code == 400 and "API key" in message:
+        return HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_API_KEY",
+                "message": message,
+                "help": ["Создайте новый ключ: https://aistudio.google.com/apikey и вставьте его в .env без кавычек и пробелов."],
+                "action": action,
+            },
+        )
 
     if response.status_code == 404:
         return HTTPException(
@@ -120,61 +158,54 @@ def api_error(response: httpx.Response, action: str) -> HTTPException:
 
 @app.get("/api/diagnostics")
 async def diagnostics() -> dict[str, Any]:
-    """Check the key and show which Gemini 3.1 models this key can see."""
+    """Test the exact GenerateContent method JarCut uses; never call ListModels."""
+    base_result = {
+        "transcribeModel": TRANSCRIBE_MODEL,
+        "ttsModel": TTS_MODEL,
+        "checkMethod": "GenerateContent",
+    }
     if not API_KEY or API_KEY == "ваш_ключ_сюда":
         return {
+            **base_result,
             "ok": False,
             "code": "NO_KEY",
             "message": "В .env не вставлен GEMINI_API_KEY.",
-            "models": [],
+            "help": ["Создайте ключ на https://aistudio.google.com/apikey и вставьте: GEMINI_API_KEY=ваш_ключ"],
         }
 
+    payload = {
+        "contents": [{"parts": [{"text": "Reply with exactly OK."}]}],
+        "generationConfig": {"temperature": 0, "maxOutputTokens": 128},
+    }
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.get(f"{API_ROOT}/v1beta/models", headers={"x-goog-api-key": API_KEY})
+        async with httpx.AsyncClient(timeout=45) as client:
+            response = await client.post(
+                f"{API_ROOT}/v1beta/models/{TRANSCRIBE_MODEL}:generateContent",
+                headers=gemini_headers(),
+                json=payload,
+            )
     except httpx.RequestError as exc:
         return {
+            **base_result,
             "ok": False,
             "code": "GEMINI_UNREACHABLE",
             "message": f"Сервер Google Gemini недоступен: {exc}",
-            "help": ["Проверьте интернет, VPN/прокси и повторите через минуту."],
-            "models": [],
-            "transcribeModel": TRANSCRIBE_MODEL,
-            "ttsModel": TTS_MODEL,
+            "help": ["Проверьте интернет, VPN/прокси и нажмите «Проверить» ещё раз."],
+            "retryable": True,
         }
 
     if response.status_code != 200:
-        exc = api_error(response, "diagnostics")
-        return {
-            "ok": False,
-            **exc.detail,
-            "transcribeModel": TRANSCRIBE_MODEL,
-            "ttsModel": TTS_MODEL,
-        }
+        exc = api_error(response, "GenerateContent")
+        return {**base_result, "ok": False, **exc.detail}
 
-    models = [item.get("name", "").replace("models/", "") for item in response.json().get("models", [])]
-    models_31 = sorted(model for model in models if "3.1" in model)
-    transcribe_available = TRANSCRIBE_MODEL in models
-    tts_available = TTS_MODEL in models
-    missing = []
-    if not transcribe_available:
-        missing.append(TRANSCRIBE_MODEL)
-    if not tts_available:
-        missing.append(TTS_MODEL)
-    ready = not missing
     return {
-        "ok": ready,
+        **base_result,
+        "ok": True,
         "keyValid": True,
-        "transcribeAvailable": transcribe_available,
-        "ttsAvailable": tts_available,
-        "transcribeModel": TRANSCRIBE_MODEL,
-        "ttsModel": TTS_MODEL,
-        "models": models_31,
-        "message": "Gemini 3.1 готов" if ready else "Ключ работает, но нет доступа: " + ", ".join(missing),
-        "help": [] if ready else [
-            "Откройте модели в Google AI Studio и проверьте доступ Preview для вашего проекта.",
-            "Для Preview-моделей может потребоваться подключённый billing и поддерживаемый регион.",
-        ],
+        "generateContentAvailable": True,
+        "ttsUnchecked": True,
+        "message": f"{TRANSCRIBE_MODEL}: GenerateContent работает. TTS проверится при первой озвучке.",
+        "help": [],
     }
 
 
