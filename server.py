@@ -53,6 +53,10 @@ TTS_MODEL = os.getenv(
 ALIGNMENT_MODE = os.getenv("ALIGNMENT_MODE", "hybrid").strip().lower()
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small").strip() or "small"
 ALIGNMENT_LOW_CONFIDENCE = 0.45
+SPEAKER_VERIFICATION = os.getenv("SPEAKER_VERIFICATION", "auto").strip().lower()
+SPEAKER_EMBEDDING_MODEL = os.getenv(
+    "SPEAKER_EMBEDDING_MODEL", "speechbrain/spkrec-ecapa-voxceleb"
+).strip() or "speechbrain/spkrec-ecapa-voxceleb"
 VERTEX_TRANSCRIBE_TIMEOUT_SECONDS = bounded_env_seconds(
     "VERTEX_TRANSCRIBE_TIMEOUT_SECONDS", 240.0, 60.0, 600.0
 )
@@ -120,6 +124,19 @@ def resolved_alignment_mode() -> str:
     return ALIGNMENT_MODE
 
 
+def resolved_speaker_verification_mode() -> str:
+    if SPEAKER_VERIFICATION not in {"off", "auto", "on"}:
+        raise ValueError(
+            "SPEAKER_VERIFICATION должен быть off, auto или on "
+            f"(сейчас: {SPEAKER_VERIFICATION or 'пусто'})"
+        )
+    return SPEAKER_VERIFICATION
+
+
+def speaker_verification_available() -> bool:
+    return all(importlib.util.find_spec(name) is not None for name in ("speechbrain", "torch"))
+
+
 def vertex_model_url(model: str) -> str:
     """Build a Vertex AI Express or Standard GenerateContent endpoint."""
     mode = resolved_vertex_mode()
@@ -144,7 +161,9 @@ def vertex_headers() -> dict[str, str]:
 
 def vertex_public_config() -> dict[str, Any]:
     alignment_mode = resolved_alignment_mode()
+    speaker_verification_mode = resolved_speaker_verification_mode()
     alignment_dependency_available = importlib.util.find_spec("faster_whisper") is not None
+    identity_available = speaker_verification_available()
     return {
         "backend": "Vertex AI",
         "mode": resolved_vertex_mode(),
@@ -157,6 +176,13 @@ def vertex_public_config() -> dict[str, Any]:
         "alignmentAvailable": alignment_mode == "off" or alignment_dependency_available,
         "alignmentDependencyAvailable": alignment_dependency_available,
         "whisperModel": WHISPER_MODEL if alignment_mode in {"hybrid", "precise"} else "disabled",
+        "speakerVerificationMode": speaker_verification_mode,
+        "speakerVerificationAvailable": identity_available,
+        "speakerEmbeddingModel": (
+            SPEAKER_EMBEDDING_MODEL
+            if speaker_verification_mode != "off" and identity_available
+            else "disabled"
+        ),
     }
 
 
@@ -245,6 +271,7 @@ async def diagnostics() -> dict[str, Any]:
     except ValueError as exc:
         message = str(exc)
         alignment_error = "ALIGNMENT_MODE" in message
+        speaker_error = "SPEAKER_VERIFICATION" in message
         return {
             "backend": "Vertex AI",
             "mode": VERTEX_MODE or "invalid",
@@ -256,11 +283,19 @@ async def diagnostics() -> dict[str, Any]:
             "alignmentAvailable": importlib.util.find_spec("faster_whisper") is not None,
             "checkMethod": "GenerateContent",
             "ok": False,
-            "code": "ALIGNMENT_CONFIG_ERROR" if alignment_error else "VERTEX_CONFIG_ERROR",
+            "code": (
+                "ALIGNMENT_CONFIG_ERROR"
+                if alignment_error
+                else "SPEAKER_CONFIG_ERROR"
+                if speaker_error
+                else "VERTEX_CONFIG_ERROR"
+            ),
             "message": message,
             "help": [
                 "Укажите ALIGNMENT_MODE=off, fast, hybrid или precise в .env."
                 if alignment_error
+                else "Укажите SPEAKER_VERIFICATION=off, auto или on в .env."
+                if speaker_error
                 else "Укажите VERTEX_MODE=express, standard или auto в .env."
             ],
         }
@@ -924,6 +959,324 @@ TRANSITION_MAX_DELAY_SECONDS = 1.0
 TRANSITION_SAFETY_MARGIN_SECONDS = 0.04
 TRANSITION_TRUE_OVERLAP_SECONDS = 0.10
 
+SPEAKER_REFERENCE_MIN_SECONDS = 1.0
+SPEAKER_REFERENCE_MAX_SECONDS = 3.0
+SPEAKER_SCAN_WINDOW_SECONDS = 1.0
+SPEAKER_SCAN_STEP_SECONDS = 0.25
+SPEAKER_MIN_COSINE = 0.25
+SPEAKER_MIN_MARGIN = 0.08
+SPEAKER_MAX_REFERENCE_SIMILARITY = 0.78
+_SPEAKER_ENCODER_INSTANCE: Any = None
+
+
+def _get_speaker_encoder() -> Any:
+    global _SPEAKER_ENCODER_INSTANCE
+    if _SPEAKER_ENCODER_INSTANCE is None:
+        from speechbrain.inference.classifiers import EncoderClassifier
+
+        model_cache = BASE / ".models" / "speechbrain-ecapa"
+        model_cache.mkdir(parents=True, exist_ok=True)
+        _SPEAKER_ENCODER_INSTANCE = EncoderClassifier.from_hparams(
+            source=SPEAKER_EMBEDDING_MODEL,
+            savedir=str(model_cache),
+            run_opts={"device": "cpu"},
+        )
+    return _SPEAKER_ENCODER_INSTANCE
+
+
+def _bounded_audio_interval(
+    audio: Any,
+    start: float,
+    end: float,
+    sampling_rate: int = 16000,
+) -> tuple[float, float] | None:
+    duration = len(audio) / sampling_rate
+    start = max(0.0, min(float(start), duration))
+    end = max(start, min(float(end), duration))
+    return (start, end) if end - start >= SPEAKER_REFERENCE_MIN_SECONDS else None
+
+
+def _speaker_embedding(
+    encoder: Any,
+    audio: Any,
+    start: float,
+    end: float,
+    sampling_rate: int = 16000,
+) -> Any | None:
+    interval = _bounded_audio_interval(audio, start, end, sampling_rate)
+    if interval is None:
+        return None
+    try:
+        import numpy as np
+        import torch
+
+        first = int(interval[0] * sampling_rate)
+        last = int(interval[1] * sampling_rate)
+        samples = np.asarray(audio[first:last], dtype=np.float32)
+        if samples.size < int(SPEAKER_REFERENCE_MIN_SECONDS * sampling_rate):
+            return None
+        # Reject silence/near-silence before it can become a misleading identity
+        # reference. decode_audio returns normalized float samples.
+        rms = float(np.sqrt(np.mean(samples.astype(np.float64) ** 2)))
+        peak = float(np.max(np.abs(samples)))
+        if not np.isfinite(rms) or rms < 0.001 or peak < 0.005:
+            return None
+        waveform = torch.from_numpy(samples).unsqueeze(0)
+        with torch.inference_mode():
+            embedding = encoder.encode_batch(waveform)
+        return embedding.detach().float().cpu().reshape(-1)
+    except Exception:
+        return None
+
+
+def _embedding_cosine(left: Any, right: Any) -> float:
+    try:
+        import torch
+
+        return float(torch.nn.functional.cosine_similarity(
+            left.reshape(1, -1), right.reshape(1, -1), dim=1
+        ).item())
+    except Exception:
+        return -1.0
+
+
+def _fallback_reference_interval(
+    segments: list[dict[str, Any]],
+    speaker_id: str,
+    excluded_ids: set[int],
+) -> tuple[float, float] | None:
+    candidates: list[tuple[float, float, float]] = []
+    for segment in segments:
+        if id(segment) in excluded_ids or str(segment.get("speaker_id", "")) != speaker_id:
+            continue
+        if segment.get("is_overlap") or segment.get("shared_vad_cross_speaker"):
+            continue
+        if segment.get("alignment_method") not in {"silero", "whisper"}:
+            continue
+        confidence = float(segment.get("alignment_confidence", 0))
+        if confidence < 0.55:
+            continue
+        start = float(segment.get("auto_start", segment.get("start", 0)))
+        end = float(segment.get("auto_end", segment.get("end", start)))
+        if end - start < SPEAKER_REFERENCE_MIN_SECONDS:
+            continue
+        candidates.append((confidence, start, end))
+    if not candidates:
+        return None
+    _, start, end = max(candidates, key=lambda item: (item[0], item[2] - item[1]))
+    return start, min(end, start + SPEAKER_REFERENCE_MAX_SECONDS)
+
+
+def _transition_reference_intervals(
+    previous: dict[str, Any],
+    current: dict[str, Any],
+    segments: list[dict[str, Any]],
+) -> tuple[tuple[float, float] | None, tuple[float, float] | None]:
+    # References must come from the ordered Whisper spans that established this
+    # boundary, not from the inaccurate Gemini overlap timestamps under repair.
+    try:
+        previous_word_start = float(current["previous_reference_word_start"])
+        previous_word_end = float(current["previous_reference_word_end"])
+        current_word_start = float(current["next_reference_word_start"])
+        current_word_end = float(current["next_reference_word_end"])
+    except (KeyError, TypeError, ValueError):
+        previous_word_start = previous_word_end = 0.0
+        current_word_start = current_word_end = 0.0
+
+    previous_interval = None
+    clean_previous_end = min(previous_word_end, current_word_start - 0.10)
+    if clean_previous_end - previous_word_start >= SPEAKER_REFERENCE_MIN_SECONDS:
+        previous_interval = (
+            max(previous_word_start, clean_previous_end - SPEAKER_REFERENCE_MAX_SECONDS),
+            clean_previous_end,
+        )
+
+    current_interval = None
+    clean_current_start = max(current_word_start, previous_word_end + 0.10)
+    if current_word_end - clean_current_start >= SPEAKER_REFERENCE_MIN_SECONDS:
+        current_interval = (
+            clean_current_start,
+            min(current_word_end, clean_current_start + SPEAKER_REFERENCE_MAX_SECONDS),
+        )
+
+    excluded = {id(previous), id(current)}
+    if previous_interval is None:
+        previous_interval = _fallback_reference_interval(
+            segments, str(previous.get("speaker_id", "")), excluded
+        )
+    if current_interval is None:
+        current_interval = _fallback_reference_interval(
+            segments, str(current.get("speaker_id", "")), excluded
+        )
+    return previous_interval, current_interval
+
+
+def _speaker_transition_groups(
+    segments: list[dict[str, Any]],
+) -> dict[tuple[str, int], list[dict[str, Any]]]:
+    groups: dict[tuple[str, int], list[dict[str, Any]]] = {}
+    for segment in segments:
+        region_id = segment.get("matched_vad_region_id")
+        overlap_group_id = segment.get("gemini_overlap_group_id")
+        if segment.get("shared_vad_cross_speaker") and isinstance(region_id, int):
+            groups.setdefault(("vad", region_id), []).append(segment)
+        elif segment.get("gemini_overlap_candidate") and isinstance(overlap_group_id, int):
+            groups.setdefault(("gemini_overlap", overlap_group_id), []).append(segment)
+    for group in groups.values():
+        group.sort(key=lambda item: (float(item["gemini_start"]), float(item["gemini_end"])))
+    return groups
+
+
+def _verify_transition_pair_with_embeddings(
+    encoder: Any,
+    audio: Any,
+    segments: list[dict[str, Any]],
+    previous: dict[str, Any],
+    current: dict[str, Any],
+) -> bool:
+    reference_intervals = _transition_reference_intervals(previous, current, segments)
+    if reference_intervals[0] is None or reference_intervals[1] is None:
+        current["speaker_verification"] = "reference_unavailable"
+        return False
+
+    previous_reference = _speaker_embedding(encoder, audio, *reference_intervals[0])
+    current_reference = _speaker_embedding(encoder, audio, *reference_intervals[1])
+    if previous_reference is None or current_reference is None:
+        current["speaker_verification"] = "reference_embedding_failed"
+        return False
+
+    reference_similarity = _embedding_cosine(previous_reference, current_reference)
+    current["speaker_reference_similarity"] = round(reference_similarity, 3)
+    if reference_similarity >= SPEAKER_MAX_REFERENCE_SIMILARITY:
+        current["speaker_verification"] = "references_not_separable"
+        return False
+
+    candidate = float(current.get("auto_start", current["gemini_start"]))
+    scan_start = max(
+        float(previous["gemini_start"]),
+        candidate - 2.0,
+    )
+    scan_end = min(
+        float(current["gemini_end"]),
+        candidate + 3.0,
+    )
+    centers: list[dict[str, float | str | None]] = []
+    center = scan_start + SPEAKER_SCAN_WINDOW_SECONDS / 2
+    while center + SPEAKER_SCAN_WINDOW_SECONDS / 2 <= scan_end + 1e-6:
+        label: str | None = None
+        previous_similarity = -1.0
+        current_similarity = -1.0
+        embedding = _speaker_embedding(
+            encoder,
+            audio,
+            center - SPEAKER_SCAN_WINDOW_SECONDS / 2,
+            center + SPEAKER_SCAN_WINDOW_SECONDS / 2,
+        )
+        if embedding is not None:
+            previous_similarity = _embedding_cosine(embedding, previous_reference)
+            current_similarity = _embedding_cosine(embedding, current_reference)
+            if (
+                previous_similarity >= SPEAKER_MIN_COSINE
+                and previous_similarity - current_similarity >= SPEAKER_MIN_MARGIN
+            ):
+                label = "previous"
+            elif (
+                current_similarity >= SPEAKER_MIN_COSINE
+                and current_similarity - previous_similarity >= SPEAKER_MIN_MARGIN
+            ):
+                label = "current"
+        # Keep failed/ambiguous positions so two list neighbors always mean two
+        # physically consecutive 250 ms scan steps.
+        centers.append({
+            "time": center,
+            "previous": previous_similarity,
+            "current": current_similarity,
+            "label": label,
+        })
+        center += SPEAKER_SCAN_STEP_SECONDS
+
+    transition: tuple[float, float] | None = None
+    for index in range(1, len(centers) - 1):
+        previous_item = centers[index - 1]
+        item = centers[index]
+        next_item = centers[index + 1]
+        if (
+            previous_item["label"] == "previous"
+            and item["label"] == "current"
+            and next_item["label"] == "current"
+        ):
+            transition = (float(previous_item["time"]), float(item["time"]))
+            break
+    if transition is None:
+        current["speaker_verification"] = "voice_change_unconfirmed"
+        return False
+
+    last_previous, first_current = transition
+    # The beginning of a current-dominant one-second window can still contain
+    # the prior voice. Use the end of the immediately preceding previous-dominant
+    # window as a conservative no-early-start floor.
+    boundary_floor = max(
+        0.0,
+        last_previous + SPEAKER_SCAN_WINDOW_SECONDS / 2,
+    )
+    old_start = float(current.get("auto_start", current["gemini_start"]))
+    new_start = max(old_start, boundary_floor)
+    current.update({
+        "auto_start": round(new_start, 3),
+        "auto_end": round(max(new_start + 0.2, float(current["auto_end"])), 3),
+        "speaker_verification": "ecapa_confirmed",
+        "speaker_boundary_floor": round(boundary_floor, 3),
+        "speaker_previous_last_center": round(last_previous, 3),
+        "speaker_current_first_center": round(first_current, 3),
+    })
+    if new_start > old_start + 0.02:
+        current["alignment_method"] = "whisper_ecapa_speaker_boundary"
+        current["alignment_warning"] = None
+    return True
+
+
+def verify_speaker_transitions_with_embeddings(
+    audio: Any,
+    segments: list[dict[str, Any]],
+) -> tuple[int, str | None]:
+    mode = resolved_speaker_verification_mode()
+    if mode == "off" or audio is None:
+        return 0, None
+    if not speaker_verification_available():
+        warning = "SpeechBrain ECAPA не установлен; используется Whisper speaker fallback"
+        return 0, warning if mode == "on" else None
+    try:
+        encoder = _get_speaker_encoder()
+    except Exception as exc:
+        return 0, f"ECAPA speaker verification недоступен: {exc}"
+
+    verified = 0
+    attempted = 0
+    embedding_failed = False
+    for group in _speaker_transition_groups(segments).values():
+        for previous, current in zip(group, group[1:]):
+            if str(previous.get("speaker_id", "")) == str(current.get("speaker_id", "")):
+                continue
+            if current.get("alignment_method") != "whisper_speaker_boundary":
+                continue
+            # Aggregate ECAPA embeddings cannot disprove simultaneous speech.
+            # Never move an original Gemini overlap candidate; ordered Whisper
+            # timing remains its overlap-safe primary correction.
+            if current.get("gemini_overlap_candidate"):
+                current["speaker_verification"] = "overlap_safe_text_only"
+                continue
+            attempted += 1
+            if _verify_transition_pair_with_embeddings(
+                encoder, audio, segments, previous, current
+            ):
+                verified += 1
+            elif current.get("speaker_verification") == "reference_embedding_failed":
+                embedding_failed = True
+    warning = None
+    if mode == "on" and attempted and embedding_failed:
+        warning = "ECAPA не смог извлечь speaker embeddings; сохранён Whisper fallback"
+    return verified, warning
+
 
 def _select_ordered_transition_spans(
     group: list[dict[str, Any]],
@@ -993,14 +1346,7 @@ def refine_speaker_transitions(
     segments: list[dict[str, Any]], words: list[dict[str, Any]]
 ) -> int:
     """Anchor uncertain cross-speaker turns without moving the prior line."""
-    groups: dict[tuple[str, int], list[dict[str, Any]]] = {}
-    for segment in segments:
-        region_id = segment.get("matched_vad_region_id")
-        overlap_group_id = segment.get("gemini_overlap_group_id")
-        if segment.get("shared_vad_cross_speaker") and isinstance(region_id, int):
-            groups.setdefault(("vad", region_id), []).append(segment)
-        elif segment.get("gemini_overlap_candidate") and isinstance(overlap_group_id, int):
-            groups.setdefault(("gemini_overlap", overlap_group_id), []).append(segment)
+    groups = _speaker_transition_groups(segments)
 
     refined = 0
     for group_key, group in groups.items():
@@ -1097,8 +1443,10 @@ def refine_speaker_transitions(
                 "alignment_confidence": round(confidence, 3),
                 "alignment_warning": None,
                 "boundary_source": "ordered_whisper_word_spans",
+                "previous_reference_word_start": round(float(previous_span["start"]), 3),
                 "previous_reference_word_end": round(float(previous_span["end"]), 3),
                 "next_reference_word_start": round(float(current_span["start"]), 3),
+                "next_reference_word_end": round(float(current_span["end"]), 3),
                 "previous_text_similarity": round(float(previous_span["text_similarity"]), 3),
                 "next_text_similarity": round(float(current_span["text_similarity"]), 3),
                 "overlap_resolution": (
@@ -1163,6 +1511,8 @@ def apply_hybrid_alignment(source: Path, segments: list[dict[str, Any]]) -> dict
             "vadRegions": 0,
             "whisperRefined": 0,
             "speakerTransitionsRefined": 0,
+            "speakerTransitionsVerified": 0,
+            "speakerVerificationWarning": None,
             "warning": None,
         }
 
@@ -1172,6 +1522,8 @@ def apply_hybrid_alignment(source: Path, segments: list[dict[str, Any]]) -> dict
 
     whisper_refined = 0
     transition_refined = 0
+    speaker_verified = 0
+    speaker_warning: str | None = None
     if mode in {"hybrid", "precise"} and importlib.util.find_spec("faster_whisper") is not None:
         windows = merge_alignment_windows(segments, precise_all=mode == "precise")
         if windows:
@@ -1182,8 +1534,14 @@ def apply_hybrid_alignment(source: Path, segments: list[dict[str, Any]]) -> dict
                     segments, words, precise_all=mode == "precise"
                 )
                 whisper_refined = transition_refined + generic_refined
+                speaker_verified, speaker_warning = verify_speaker_transitions_with_embeddings(
+                    audio, segments
+                )
             except Exception as exc:
                 warning = f"Precise fallback недоступен: {exc}"
+
+    if speaker_warning:
+        warning = f"{warning}; {speaker_warning}" if warning else speaker_warning
 
     for segment in segments:
         segment["start"] = float(segment["auto_start"]) + float(segment.get("manual_offset", 0))
@@ -1196,6 +1554,8 @@ def apply_hybrid_alignment(source: Path, segments: list[dict[str, Any]]) -> dict
         "vadRegions": len(regions),
         "whisperRefined": whisper_refined,
         "speakerTransitionsRefined": transition_refined,
+        "speakerTransitionsVerified": speaker_verified,
+        "speakerVerificationWarning": speaker_warning,
         "warning": warning,
     }
 
@@ -1949,5 +2309,15 @@ if __name__ == "__main__":
     alignment_status = config["alignmentMode"] if config["alignmentAvailable"] else "недоступна (установите faster-whisper)"
     if config["alignmentAvailable"] and config["alignmentMode"] in {"hybrid", "precise"}:
         alignment_status += f" / Whisper {config['whisperModel']}"
-    print(f"Синхронизация: {alignment_status}\n")
+    print(f"Синхронизация: {alignment_status}")
+    if config["speakerVerificationMode"] == "off":
+        speaker_status = "выключена"
+    elif config["speakerVerificationAvailable"]:
+        speaker_status = f"{config['speakerVerificationMode']} / ECAPA {config['speakerEmbeddingModel']}"
+    else:
+        speaker_status = (
+            f"{config['speakerVerificationMode']} / Whisper fallback "
+            "(необязательно: python -m pip install speechbrain)"
+        )
+    print(f"Проверка голоса: {speaker_status}\n")
     uvicorn.run(app, host="0.0.0.0", port=8000)

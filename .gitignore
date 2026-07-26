@@ -1,4 +1,5 @@
 .env
+.speechbrain-install-failed
 __pycache__/
 semantic-review/
 .models/
