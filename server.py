@@ -664,6 +664,43 @@ def parse_pcm_rate(mime: str) -> int:
     return 24000
 
 
+def trim_tts_leading_silence(source: Path) -> Path:
+    """Remove model-added silence so audible speech starts at the segment timestamp."""
+    synced = source.with_name(f"{source.stem}_synced.wav")
+    command = [
+        "ffmpeg", "-y", "-i", str(source),
+        "-af", (
+            "silenceremove=start_periods=1:start_duration=0.01:"
+            "start_threshold=-55dB:start_silence=0.015"
+        ),
+        "-c:a", "pcm_s16le", str(synced),
+    ]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0 or not synced.exists() or synced.stat().st_size <= 44:
+            synced.unlink(missing_ok=True)
+            return source
+
+        source_duration = probe_duration(source)
+        synced_duration = probe_duration(synced)
+        removed_duration = source_duration - synced_duration
+        max_safe_removal = min(1.0, max(0.12, source_duration * 0.35))
+        if (
+            source_duration <= 0
+            or synced_duration <= 0.05
+            or removed_duration < -0.05
+            or removed_duration > max_safe_removal
+        ):
+            synced.unlink(missing_ok=True)
+            return source
+
+        source.unlink(missing_ok=True)
+        return synced
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        synced.unlink(missing_ok=True)
+        return source
+
+
 async def synthesize(
     client: httpx.AsyncClient,
     text: str,
@@ -678,6 +715,7 @@ async def synthesize(
         "Perform the following translated line like a professional film dubbing actor. "
         f"Voice direction: {delivery or 'natural'}, emotion: {emotion or 'neutral'}. "
         f"Finish naturally in approximately {target_duration:.1f} seconds. "
+        "Start speaking immediately with no introductory pause or leading silence. "
         "Speak only the dialogue; do not read these instructions. Dialogue: " + text
     )
     payload = {
@@ -721,8 +759,16 @@ async def synthesize(
             raw = pcm_to_wav(raw, parse_pcm_rate(mime))
         suffix = ".wav" if ("wav" in mime.lower() or "pcm" in mime.lower() or "l16" in mime.lower()) else ".mp3"
         filename = f"voice_{uuid.uuid4().hex[:10]}{suffix}"
-        (UPLOADS / filename).write_bytes(raw)
-        return {"ok": True, "url": f"/uploads/{filename}", "filename": filename, "voice": voice}
+        source_path = UPLOADS / filename
+        source_path.write_bytes(raw)
+        synced_path = trim_tts_leading_silence(source_path)
+        return {
+            "ok": True,
+            "url": f"/uploads/{synced_path.name}",
+            "filename": synced_path.name,
+            "voice": voice,
+            "leadingSilenceTrimmed": synced_path != source_path,
+        }
     except Exception as exc:
         return {"ok": False, "error": {"code": "BAD_TTS_RESPONSE", "message": str(exc), "help": []}}
 
