@@ -580,14 +580,55 @@ def align_segments_with_vad(
         region = regions[assignment]
         indices = grouped[assignment]
         group = [segments[item] for item in indices]
+        position = indices.index(index)
         shared = len(group) > 1
+        speaker_ids = {str(item.get("speaker_id", "")) for item in group}
+        cross_speaker_shared = shared and len(speaker_ids) > 1
+        previous_in_group = group[position - 1] if position > 0 else None
+        next_in_group = group[position + 1] if position + 1 < len(group) else None
+        transition_from_previous = bool(
+            previous_in_group
+            and str(previous_in_group.get("speaker_id", ""))
+            != str(segment.get("speaker_id", ""))
+        )
+        transition_to_next = bool(
+            next_in_group
+            and str(next_in_group.get("speaker_id", ""))
+            != str(segment.get("speaker_id", ""))
+        )
+        segment.update({
+            "matched_vad_region_id": assignment,
+            "matched_vad_start": round(float(region["start"]), 3),
+            "matched_vad_end": round(float(region["end"]), 3),
+            "shared_vad_cross_speaker": cross_speaker_shared,
+            "speaker_transition_detected": transition_from_previous,
+            "speaker_transition_reference": transition_to_next,
+        })
+
+        # VAD only detects speech activity, not who is speaking. A shared region
+        # containing different speaker IDs must never be split by an energy dip:
+        # that dip may be an inhale or pause inside the previous speaker's line.
+        # Preserve Gemini timing until ordered Whisper text anchors confirm the turn.
+        if cross_speaker_shared:
+            segment.update({
+                "auto_start": segment["gemini_start"],
+                "auto_end": segment["gemini_end"],
+                "alignment_method": "gemini_fallback_speaker_transition",
+                "alignment_confidence": 0.0,
+                "alignment_warning": (
+                    "speaker_boundary_pending"
+                    if transition_from_previous
+                    else "speaker_transition_shared_region"
+                ),
+            })
+            continue
+
         boundaries = _energy_split_boundaries(audio, region, group) if shared else []
         split_succeeded = boundaries is not None
 
         if not shared:
             auto_start, auto_end = region["start"], region["end"]
         elif split_succeeded:
-            position = indices.index(index)
             edges = [region["start"], *boundaries, region["end"]]
             auto_start, auto_end = edges[position], edges[position + 1]
         else:
@@ -632,8 +673,12 @@ def merge_alignment_windows(segments: list[dict[str, Any]], precise_all: bool = 
     candidates.sort(key=lambda item: item["gemini_start"])
     windows: list[dict[str, Any]] = []
     for segment in candidates:
-        start = max(0.0, float(segment["gemini_start"]) - 0.6)
-        end = float(segment["gemini_end"]) + 0.6
+        if segment.get("shared_vad_cross_speaker"):
+            start = max(0.0, float(segment.get("matched_vad_start", segment["gemini_start"])) - 0.3)
+            end = float(segment.get("matched_vad_end", segment["gemini_end"])) + 0.3
+        else:
+            start = max(0.0, float(segment["gemini_start"]) - 0.6)
+            end = float(segment["gemini_end"]) + 0.6
         if windows and start - windows[-1]["end"] <= 1.0:
             windows[-1]["end"] = max(windows[-1]["end"], end)
             windows[-1]["segment_ids"].append(id(segment))
@@ -687,7 +732,94 @@ def run_whisper_for_windows(source: Path, windows: list[dict[str, Any]]) -> list
                     "end": float(word.end),
                     "probability": float(word.probability or 0),
                 })
+    words.sort(key=lambda item: (item["start"], item["end"]))
+    for index, word in enumerate(words):
+        word["index"] = index
     return words
+
+
+def _word_span_candidates(
+    segment: dict[str, Any],
+    words: list[dict[str, Any]],
+    min_word_index: int = 0,
+    region_start: float | None = None,
+    region_end: float | None = None,
+    use_gemini_window: bool = True,
+) -> list[dict[str, Any]]:
+    """Return contiguous Whisper spans with independent text/probability evidence."""
+    if use_gemini_window:
+        window_start = max(
+            float(segment["gemini_start"]) - 1.5,
+            region_start if region_start is not None else -math.inf,
+        )
+        window_end = min(
+            float(segment["gemini_end"]) + 1.5,
+            region_end if region_end is not None else math.inf,
+        )
+    else:
+        window_start = region_start if region_start is not None else -math.inf
+        window_end = region_end if region_end is not None else math.inf
+
+    target = _normalize_words(str(segment.get("original") or ""))
+    if not target:
+        return []
+    candidates = [
+        (int(word.get("index", index)), word)
+        for index, word in enumerate(words)
+        if int(word.get("index", index)) >= min_word_index
+        and word["end"] >= window_start
+        and word["start"] <= window_end
+    ]
+    if not candidates:
+        return []
+
+    target_text = " ".join(target)
+    expected_start = float(segment["gemini_start"])
+    matches: list[dict[str, Any]] = []
+    min_length, max_length = max(1, len(target) - 3), len(target) + 4
+    for start_index in range(len(candidates)):
+        for length in range(min_length, max_length + 1):
+            chosen = candidates[start_index:start_index + length]
+            if len(chosen) != length:
+                continue
+            indices = [item[0] for item in chosen]
+            if any(right != left + 1 for left, right in zip(indices, indices[1:])):
+                continue
+            chosen_words = [item[1] for item in chosen]
+            similarity = difflib.SequenceMatcher(
+                None, target_text, " ".join(word["word"] for word in chosen_words)
+            ).ratio()
+            proximity = max(0.0, 1.0 - abs(chosen_words[0]["start"] - expected_start) / 1.5)
+            probability = sum(word["probability"] for word in chosen_words) / len(chosen_words)
+            score = 0.70 * similarity + 0.15 * proximity + 0.15 * probability
+            candidate = {
+                "score": score,
+                "text_similarity": similarity,
+                "probability": probability,
+                "start": float(chosen_words[0]["start"]),
+                "end": float(chosen_words[-1]["end"]),
+                "start_index": indices[0],
+                "end_index": indices[-1],
+            }
+            matches.append(candidate)
+    return sorted(matches, key=lambda item: (item["start_index"], -item["score"]))
+
+
+def _best_word_span(
+    segment: dict[str, Any],
+    words: list[dict[str, Any]],
+    min_word_index: int = 0,
+    region_start: float | None = None,
+    region_end: float | None = None,
+) -> dict[str, Any] | None:
+    matches = _word_span_candidates(
+        segment,
+        words,
+        min_word_index=min_word_index,
+        region_start=region_start,
+        region_end=region_end,
+    )
+    return max(matches, key=lambda item: item["score"], default=None)
 
 
 def _best_word_sequence(
@@ -695,38 +827,167 @@ def _best_word_sequence(
     words: list[dict[str, Any]],
     min_word_start: float = -math.inf,
 ) -> tuple[float, float, float] | None:
-    target = _normalize_words(str(segment.get("original") or ""))
-    if not target:
-        return None
-    window_start = float(segment["gemini_start"]) - 1.5
-    window_end = float(segment["gemini_end"]) + 1.5
-    candidates = [
-        word for word in words
-        if word["start"] >= min_word_start - 0.001
-        and word["end"] >= window_start
-        and word["start"] <= window_end
+    """Backward-compatible tuple wrapper used by generic low-confidence alignment."""
+    eligible_indices = [
+        int(word.get("index", index))
+        for index, word in enumerate(words)
+        if float(word["start"]) >= min_word_start - 0.001
     ]
-    if not candidates:
+    min_word_index = min(eligible_indices) if eligible_indices else len(words)
+    match = _best_word_span(segment, words, min_word_index=min_word_index)
+    if match is None:
         return None
+    return match["score"], match["start"], match["end"]
 
-    target_text = " ".join(target)
-    expected_start = float(segment["gemini_start"])
-    best: tuple[float, float, float] | None = None
-    min_length, max_length = max(1, len(target) - 3), len(target) + 4
-    for start_index in range(len(candidates)):
-        for length in range(min_length, max_length + 1):
-            chosen = candidates[start_index:start_index + length]
-            if not chosen:
+
+TRANSITION_MIN_TEXT_SIMILARITY = 0.78
+TRANSITION_MIN_WORD_PROBABILITY = 0.55
+TRANSITION_MAX_ADVANCE_SECONDS = 0.15
+TRANSITION_MAX_DELAY_SECONDS = 1.0
+TRANSITION_SAFETY_MARGIN_SECONDS = 0.04
+
+
+def _select_ordered_transition_spans(
+    group: list[dict[str, Any]],
+    words: list[dict[str, Any]],
+    region_start: float,
+    region_end: float,
+) -> list[dict[str, Any] | None]:
+    """Globally assign earliest valid non-overlapping spans across one VAD group."""
+    candidate_lists: list[list[dict[str, Any]]] = []
+    for segment in group:
+        unique: dict[tuple[int, int], dict[str, Any]] = {}
+        for match in _word_span_candidates(
+            segment,
+            words,
+            region_start=region_start,
+            region_end=region_end,
+            use_gemini_window=False,
+        ):
+            if (
+                match["text_similarity"] < TRANSITION_MIN_TEXT_SIMILARITY
+                or match["probability"] < TRANSITION_MIN_WORD_PROBABILITY
+            ):
                 continue
-            ratio = difflib.SequenceMatcher(
-                None, target_text, " ".join(word["word"] for word in chosen)
-            ).ratio()
-            proximity = max(0.0, 1.0 - abs(chosen[0]["start"] - expected_start) / 1.5)
-            probability = sum(word["probability"] for word in chosen) / len(chosen)
-            score = 0.70 * ratio + 0.15 * proximity + 0.15 * probability
-            if best is None or score > best[0]:
-                best = (score, chosen[0]["start"], chosen[-1]["end"])
-    return best
+            key = (int(match["start_index"]), int(match["end_index"]))
+            if key not in unique or match["score"] > unique[key]["score"]:
+                unique[key] = match
+        candidate_lists.append(sorted(
+            unique.values(),
+            key=lambda item: (item["start_index"], item["end_index"], -item["score"]),
+        ))
+
+    # State objective: match as many group segments as possible, then prefer the
+    # earliest complete ordered assignment, then the strongest aggregate score.
+    states: dict[int, tuple[list[dict[str, Any] | None], tuple[int, int, float]]] = {
+        -1: ([], (0, 0, 0.0))
+    }
+    for candidates in candidate_lists:
+        next_states: dict[int, tuple[list[dict[str, Any] | None], tuple[int, int, float]]] = {}
+        for last_end, (chosen, objective) in states.items():
+            options: list[dict[str, Any] | None] = [None, *candidates]
+            for match in options:
+                if match is not None and int(match["start_index"]) <= last_end:
+                    continue
+                new_end = last_end if match is None else int(match["end_index"])
+                new_objective = objective
+                if match is not None:
+                    new_objective = (
+                        objective[0] + 1,
+                        objective[1] - int(match["start_index"]),
+                        objective[2] + float(match["score"]),
+                    )
+                candidate_state = ([*chosen, match], new_objective)
+                existing = next_states.get(new_end)
+                if existing is None or candidate_state[1] > existing[1]:
+                    next_states[new_end] = candidate_state
+        states = next_states
+
+    if not states:
+        return [None] * len(group)
+    return max(states.values(), key=lambda item: item[1])[0]
+
+
+def refine_speaker_transitions(
+    segments: list[dict[str, Any]], words: list[dict[str, Any]]
+) -> int:
+    """Anchor cross-speaker turns in shared VAD regions without moving the prior line."""
+    groups: dict[int, list[dict[str, Any]]] = {}
+    for segment in segments:
+        region_id = segment.get("matched_vad_region_id")
+        if segment.get("shared_vad_cross_speaker") and isinstance(region_id, int):
+            groups.setdefault(region_id, []).append(segment)
+
+    refined = 0
+    for group in groups.values():
+        group.sort(key=lambda item: (float(item["gemini_start"]), float(item["gemini_end"])))
+        region_start = min(float(item["matched_vad_start"]) for item in group) - 0.3
+        region_end = max(float(item["matched_vad_end"]) for item in group) + 0.3
+        selected = _select_ordered_transition_spans(
+            group, words, region_start=region_start, region_end=region_end
+        )
+        spans = {id(segment): match for segment, match in zip(group, selected)}
+
+        for previous, current in zip(group, group[1:]):
+            if str(previous.get("speaker_id", "")) == str(current.get("speaker_id", "")):
+                continue
+            previous_span = spans.get(id(previous))
+            current_span = spans.get(id(current))
+            if previous_span is None or current_span is None:
+                current.update({
+                    "auto_start": float(current["gemini_start"]),
+                    "auto_end": float(current["gemini_end"]),
+                    "alignment_method": "gemini_fallback_speaker_transition",
+                    "alignment_confidence": 0.0,
+                    "alignment_warning": "speaker_boundary_not_found_low_confidence",
+                    "boundary_source": "gemini_fallback",
+                })
+                continue
+
+            boundary = float(previous_span["end"]) + TRANSITION_SAFETY_MARGIN_SECONDS
+            anchored_start = max(float(current_span["start"]), boundary)
+            gemini_start = float(current["gemini_start"])
+            if anchored_start < gemini_start - TRANSITION_MAX_ADVANCE_SECONDS:
+                current.update({
+                    "auto_start": gemini_start,
+                    "auto_end": float(current["gemini_end"]),
+                    "alignment_method": "gemini_fallback_speaker_transition",
+                    "alignment_confidence": 0.3,
+                    "alignment_warning": "whisper_start_too_early_vs_gemini",
+                    "boundary_source": "gemini_fallback",
+                })
+                continue
+            if anchored_start > gemini_start + TRANSITION_MAX_DELAY_SECONDS:
+                current.update({
+                    "auto_start": gemini_start,
+                    "auto_end": float(current["gemini_end"]),
+                    "alignment_method": "gemini_fallback_speaker_transition",
+                    "alignment_confidence": 0.3,
+                    "alignment_warning": "whisper_start_too_late_vs_gemini",
+                    "boundary_source": "gemini_fallback",
+                })
+                continue
+
+            confidence = min(
+                0.95,
+                0.55
+                + 0.25 * min(previous_span["text_similarity"], current_span["text_similarity"])
+                + 0.20 * min(previous_span["probability"], current_span["probability"]),
+            )
+            current.update({
+                "auto_start": round(max(0.0, anchored_start), 3),
+                "auto_end": round(max(anchored_start + 0.2, float(current["gemini_end"])), 3),
+                "alignment_method": "whisper_speaker_boundary",
+                "alignment_confidence": round(confidence, 3),
+                "alignment_warning": None,
+                "boundary_source": "ordered_whisper_word_spans",
+                "previous_reference_word_end": round(float(previous_span["end"]), 3),
+                "next_reference_word_start": round(float(current_span["start"]), 3),
+                "previous_text_similarity": round(float(previous_span["text_similarity"]), 3),
+                "next_text_similarity": round(float(current_span["text_similarity"]), 3),
+            })
+            refined += 1
+    return refined
 
 
 def refine_segments_with_whisper(
@@ -738,6 +999,7 @@ def refine_segments_with_whisper(
         (
             segment for segment in segments
             if not segment.get("is_overlap")
+            and not segment.get("shared_vad_cross_speaker")
             and (
                 precise_all
                 or float(segment.get("alignment_confidence", 0)) < ALIGNMENT_LOW_CONFIDENCE
@@ -776,21 +1038,30 @@ def apply_hybrid_alignment(source: Path, segments: list[dict[str, Any]]) -> dict
         segment.setdefault("alignment_warning", "alignment_disabled" if mode == "off" else None)
 
     if mode == "off":
-        return {"mode": mode, "vadRegions": 0, "whisperRefined": 0, "warning": None}
+        return {
+            "mode": mode,
+            "vadRegions": 0,
+            "whisperRefined": 0,
+            "speakerTransitionsRefined": 0,
+            "warning": None,
+        }
 
     audio, regions, warning = run_silero_vad(source)
     if audio is not None and regions:
         align_segments_with_vad(segments, audio, regions)
 
     whisper_refined = 0
+    transition_refined = 0
     if mode in {"hybrid", "precise"} and importlib.util.find_spec("faster_whisper") is not None:
         windows = merge_alignment_windows(segments, precise_all=mode == "precise")
         if windows:
             try:
                 words = run_whisper_for_windows(source, windows)
-                whisper_refined = refine_segments_with_whisper(
+                transition_refined = refine_speaker_transitions(segments, words)
+                generic_refined = refine_segments_with_whisper(
                     segments, words, precise_all=mode == "precise"
                 )
+                whisper_refined = transition_refined + generic_refined
             except Exception as exc:
                 warning = f"Precise fallback недоступен: {exc}"
 
@@ -804,6 +1075,7 @@ def apply_hybrid_alignment(source: Path, segments: list[dict[str, Any]]) -> dict
         "mode": mode,
         "vadRegions": len(regions),
         "whisperRefined": whisper_refined,
+        "speakerTransitionsRefined": transition_refined,
         "warning": warning,
     }
 
