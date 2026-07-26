@@ -3,467 +3,189 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>JarCut — Авто-дубляж</title>
+<title>JarCut — автоматический дубляж</title>
 <style>
-* { margin:0; padding:0; box-sizing:border-box; }
-body {
-    font-family:'Segoe UI',system-ui,sans-serif; background:#0d0d14; color:#e8eaed;
-    min-height:100vh; padding:24px 16px 60px;
-}
-.wrap { max-width:820px; margin:0 auto; }
-
-h1 { font-size:22px; font-weight:800; margin-bottom:4px;
-     background:linear-gradient(90deg,#8b5cf6,#ec4899); -webkit-background-clip:text; -webkit-text-fill-color:transparent; }
-.sub { font-size:13px; color:#8b8f9a; margin-bottom:20px; }
-
-/* ── Drop zone ── */
-.drop {
-    border:2px dashed #2f3340; border-radius:14px; padding:44px 20px; text-align:center;
-    cursor:pointer; transition:.2s; background:#14141f;
-}
-.drop:hover, .drop.over { border-color:#8b5cf6; background:#191926; }
-.drop .ic { font-size:44px; margin-bottom:10px; }
-.drop .t1 { font-size:15px; font-weight:600; margin-bottom:4px; }
-.drop .t2 { font-size:12px; color:#6b7080; }
-
-/* ── Video ── */
-video { width:100%; border-radius:12px; background:#000; display:block; }
-
-/* ── Cards ── */
-.card { background:#14141f; border:1px solid #23252f; border-radius:12px; padding:16px; margin-top:14px; }
-
-/* ── Controls row ── */
-.row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
-label.lbl { font-size:12px; color:#8b8f9a; }
-
-select {
-    background:#1c1c2a; border:1px solid #2f3340; color:#e8eaed; padding:10px 12px;
-    border-radius:9px; font-size:14px; font-family:inherit; flex:1; min-width:150px; cursor:pointer;
-}
-select:focus { outline:none; border-color:#8b5cf6; }
-
-/* ── Buttons ── */
-.btn {
-    border:none; border-radius:10px; font-family:inherit; font-weight:600; cursor:pointer;
-    transition:.15s; display:inline-flex; align-items:center; justify-content:center; gap:8px;
-}
-.btn:disabled { opacity:.4; cursor:not-allowed; }
-.btn-big { width:100%; padding:16px; font-size:16px; margin-top:12px; }
-.btn-p { background:linear-gradient(90deg,#8b5cf6,#7c3aed); color:#fff; }
-.btn-p:hover:not(:disabled) { filter:brightness(1.15); }
-.btn-g { background:#10b981; color:#fff; }
-.btn-g:hover:not(:disabled) { background:#059669; }
-.btn-s { background:#22232e; color:#b9bdc7; padding:7px 12px; font-size:12px; border:1px solid #2f3340; }
-.btn-s:hover { border-color:#8b5cf6; color:#fff; }
-
-/* ── Slider ── */
-.slider-row { display:flex; align-items:center; gap:12px; margin-top:14px; }
-input[type=range] { flex:1; accent-color:#8b5cf6; height:6px; }
-.pct { font-size:13px; color:#b9bdc7; min-width:42px; text-align:right; font-variant-numeric:tabular-nums; }
-
-/* ── Status ── */
-.status { margin-top:14px; padding:14px 16px; border-radius:10px; font-size:14px; display:flex; align-items:center; gap:10px; }
-.status.work { background:#1e1b3a; color:#c4b5fd; }
-.status.ok   { background:#0d2e22; color:#6ee7b7; }
-.status.err  { background:#33161a; color:#fca5a5; }
-.spin { width:16px; height:16px; border:2px solid #4c4a6a; border-top-color:#a78bfa; border-radius:50%; animation:sp .6s linear infinite; flex-shrink:0; }
-@keyframes sp { to { transform:rotate(360deg) } }
-
-.bar { height:5px; background:#1c1c2a; border-radius:3px; overflow:hidden; margin-top:12px; }
-.bar > i { display:block; height:100%; width:0; background:linear-gradient(90deg,#8b5cf6,#10b981); transition:width .3s; }
-
-/* ── Phrases ── */
-.head { display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; }
-.head h2 { font-size:14px; font-weight:600; }
-.count { font-size:12px; color:#6b7080; }
-
-.ph { display:flex; gap:10px; padding:10px 0; border-bottom:1px solid #1e2029; }
-.ph:last-child { border-bottom:none; }
-.ph-t { font-size:11px; color:#6b7080; font-variant-numeric:tabular-nums; padding-top:9px; min-width:38px; cursor:pointer; }
-.ph-t:hover { color:#a78bfa; }
-.ph-b { flex:1; min-width:0; }
-.ph-o { font-size:11px; color:#5f6470; margin-bottom:5px; }
-.ph textarea {
-    width:100%; background:#1a1a26; border:1px solid #282a36; color:#e8eaed; padding:8px 10px;
-    border-radius:8px; font-size:14px; font-family:inherit; resize:vertical; min-height:38px; line-height:1.4;
-}
-.ph textarea:focus { outline:none; border-color:#8b5cf6; }
-.ph-r { display:flex; flex-direction:column; gap:5px; align-items:center; padding-top:6px; }
-.dot { font-size:15px; }
-
-audio { width:100%; height:30px; margin-top:6px; }
-
-a.dl { color:#6ee7b7; font-weight:600; text-decoration:none; }
-a.dl:hover { text-decoration:underline; }
-
-/* ── Toast ── */
-.toasts { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); display:flex; flex-direction:column; gap:8px; z-index:99; }
-.toast { padding:11px 18px; border-radius:9px; font-size:13px; animation:up .25s; box-shadow:0 8px 24px rgba(0,0,0,.5); }
-.toast.i { background:#312e81; color:#ddd6fe; }
-.toast.o { background:#065f46; color:#a7f3d0; }
-.toast.e { background:#7f1d1d; color:#fecaca; }
-@keyframes up { from { transform:translateY(16px); opacity:0 } }
+:root{--bg:#0b0c10;--card:#15171d;--card2:#1c1f27;--line:#292d38;--text:#f2f4f8;--muted:#8c93a3;--purple:#7c5cff;--green:#19b77a;--red:#ef5b68;--yellow:#e8a93a}
+*{box-sizing:border-box;margin:0;padding:0}body{background:var(--bg);color:var(--text);font-family:Inter,"Segoe UI",system-ui,sans-serif;min-height:100vh;padding:24px 16px 60px}.wrap{max-width:880px;margin:auto}
+.top{display:flex;align-items:center;gap:12px;margin-bottom:18px}.brand{font-size:23px;font-weight:850;letter-spacing:-.5px}.brand b{color:var(--purple)}.tagline{color:var(--muted);font-size:13px}.api{margin-left:auto;display:flex;align-items:center;gap:7px;border:1px solid var(--line);border-radius:999px;padding:6px 9px 6px 10px;font-size:11px;color:var(--muted);background:var(--card)}.api-dot{width:7px;height:7px;border-radius:50%;background:var(--yellow)}.api.ok .api-dot{background:var(--green)}.api.err .api-dot{background:var(--red)}
+button,select,textarea,input{font:inherit}.btn{border:0;border-radius:9px;padding:9px 13px;cursor:pointer;font-size:12px;font-weight:650;display:inline-flex;align-items:center;justify-content:center;gap:7px;transition:.15s}.btn:disabled{opacity:.42;cursor:not-allowed}.btn-main{width:100%;margin-top:13px;padding:15px;font-size:15px;color:white;background:linear-gradient(100deg,#7252ff,#9b4dff)}.btn-main:hover:not(:disabled){filter:brightness(1.12)}.btn-green{background:var(--green);color:#fff}.btn-soft{background:#232630;color:#ccd0da;border:1px solid #323744}.btn-soft:hover{border-color:var(--purple)}.btn-small{padding:6px 9px;font-size:11px}
+.drop{border:2px dashed #303440;border-radius:14px;background:var(--card);padding:45px 20px;text-align:center;cursor:pointer;transition:.2s}.drop:hover,.drop.over{border-color:var(--purple);background:#181724}.drop-icon{font-size:43px;margin-bottom:8px}.drop-title{font-size:15px;font-weight:700}.drop-sub{font-size:12px;color:var(--muted);margin-top:4px}video{display:block;width:100%;max-height:490px;background:#000;border-radius:13px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:13px;padding:16px;margin-top:13px}.controls{display:grid;grid-template-columns:auto minmax(160px,1fr) auto minmax(210px,1fr);align-items:center;gap:9px}.label{font-size:11px;color:var(--muted)}select{background:var(--card2);color:var(--text);border:1px solid #343946;border-radius:9px;padding:9px 11px;min-width:0}select:focus,textarea:focus{outline:0;border-color:var(--purple)}
+.status{margin-top:12px;padding:12px 14px;border-radius:9px;font-size:13px;display:flex;align-items:flex-start;gap:9px;line-height:1.45}.status.work{background:#201c3b;color:#d4cbff}.status.ok{background:#0f3025;color:#8ce5bf}.status.err{background:#381a20;color:#ffb1b8}.spin{width:15px;height:15px;flex:none;border:2px solid #59546f;border-top-color:#aa91ff;border-radius:50%;animation:spin .65s linear infinite;margin-top:2px}@keyframes spin{to{transform:rotate(360deg)}}.bar{height:5px;background:#20232b;border-radius:3px;overflow:hidden;margin-top:10px}.bar i{display:block;width:0;height:100%;background:linear-gradient(90deg,var(--purple),var(--green));transition:width .25s}.help{margin-top:9px;padding-left:18px;color:#ffc0c5;font-size:12px}.help li{margin:4px 0}.model-note{color:var(--muted);font-size:10px;margin-top:8px}
+.section-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:11px}.section-head h2{font-size:14px}.count{font-size:11px;color:var(--muted)}
+.speakers{display:grid;grid-template-columns:repeat(auto-fit,minmax(245px,1fr));gap:8px}.speaker{border:1px solid var(--line);background:var(--card2);border-radius:10px;padding:10px}.speaker-top{display:flex;align-items:center;gap:7px;margin-bottom:7px}.speaker-color{width:10px;height:10px;border-radius:50%}.speaker-name{font-size:12px;font-weight:700}.speaker-desc{font-size:10px;color:var(--muted);margin-left:auto;max-width:120px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.speaker select{width:100%;padding:7px 9px;font-size:11px}
+.phrase{display:grid;grid-template-columns:45px minmax(0,1fr) auto;gap:9px;border-top:1px solid #222630;padding:11px 0}.phrase:first-child{border-top:0}.time{font-size:10px;color:var(--muted);padding-top:7px;cursor:pointer;font-variant-numeric:tabular-nums}.time:hover{color:#b7a7ff}.speaker-badge{display:inline-block;border-radius:999px;padding:2px 7px;font-size:9px;font-weight:750;color:#fff;margin-bottom:5px}.original{font-size:10px;color:#686f7d;font-style:italic;margin-bottom:5px}.phrase textarea{width:100%;resize:vertical;min-height:38px;border:1px solid #2e3340;border-radius:8px;background:#191c23;color:var(--text);padding:8px 9px;font-size:13px;line-height:1.35}.phrase-actions{display:flex;flex-direction:column;gap:5px;align-items:center}.state{font-size:14px}audio{width:100%;height:29px;margin-top:6px}
+.volume{display:grid;grid-template-columns:auto 1fr 42px;gap:10px;align-items:center}.volume input{accent-color:var(--purple)}.percent{font-size:12px;color:var(--muted);text-align:right}.download{color:#89e5be;font-weight:750;text-decoration:none}.download:hover{text-decoration:underline}
+.toasts{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);z-index:20;display:flex;flex-direction:column;gap:7px}.toast{border-radius:9px;padding:10px 15px;font-size:12px;box-shadow:0 8px 26px #0008;animation:up .2s}.toast.info{background:#31285f}.toast.ok{background:#096544}.toast.err{background:#842b35}@keyframes up{from{opacity:0;transform:translateY(12px)}}
+@media(max-width:720px){body{padding:14px 10px 45px}.top{align-items:flex-start;flex-wrap:wrap}.api{margin-left:0}.controls{grid-template-columns:1fr}.label{margin-top:3px}.speaker-desc{max-width:90px}.phrase{grid-template-columns:38px minmax(0,1fr)}.phrase-actions{grid-column:2;flex-direction:row}.volume{grid-template-columns:1fr 42px}.volume .label{grid-column:1/-1}}
 </style>
 </head>
 <body>
 <div class="wrap">
+  <header class="top">
+    <div><div class="brand">Jar<b>Cut</b></div><div class="tagline">Видео → профессиональный дубляж</div></div>
+    <div class="api" id="api"><span class="api-dot"></span><span id="api-text">Проверка Gemini…</span><button class="btn btn-soft btn-small" onclick="checkApi()">Проверить</button></div>
+  </header>
+  <div class="status" id="api-error" hidden></div>
 
-    <h1>JarCut</h1>
-    <div class="sub">Поставь видео — получи профессиональный дубляж</div>
+  <div class="drop" id="drop">
+    <div class="drop-icon">🎬</div><div class="drop-title">Перетащите видео сюда</div>
+    <div class="drop-sub">или нажмите для выбора файла</div><input id="file" type="file" accept="video/*,audio/*" hidden>
+  </div>
+  <video id="video" controls hidden></video>
 
-    <!-- Загрузка -->
-    <div class="drop" id="drop">
-        <div class="ic">🎬</div>
-        <div class="t1">Перетащи видео сюда</div>
-        <div class="t2">или нажми, чтобы выбрать файл</div>
-        <input type="file" id="file" accept="video/*,audio/*" hidden>
+  <section class="card" id="setup" hidden>
+    <div class="controls">
+      <span class="label">Язык дубляжа</span>
+      <select id="language">
+        <option value="uz">🇺🇿 Узбекский</option><option value="ru">🇷🇺 Русский</option>
+        <option value="en">🇬🇧 Английский</option><option value="tr">🇹🇷 Турецкий</option>
+        <option value="kk">🇰🇿 Казахский</option><option value="ky">🇰🇬 Кыргызский</option>
+        <option value="tg">🇹🇯 Таджикский</option><option value="ar">🇸🇦 Арабский</option>
+        <option value="de">🇩🇪 Немецкий</option><option value="fr">🇫🇷 Французский</option>
+        <option value="es">🇪🇸 Испанский</option><option value="ko">🇰🇷 Корейский</option>
+        <option value="ja">🇯🇵 Японский</option>
+      </select>
+      <span class="label">Голоса</span><div style="font-size:12px;color:#b6bbc7">Автоматически: отдельный голос каждому человеку</div>
     </div>
+    <button class="btn btn-main" id="dub" disabled>Дублировать видео</button>
+    <div class="bar" id="progress" hidden><i id="progress-fill"></i></div>
+    <div class="status" id="status" hidden></div>
+    <div class="model-note" id="model-note">Проверяю доступные модели Gemini…</div>
+  </section>
 
-    <!-- Видео -->
-    <video id="vid" controls hidden></video>
+  <section class="card" id="speakers-card" hidden>
+    <div class="section-head"><h2>Персонажи и голоса</h2><span class="count" id="speaker-count"></span></div>
+    <div class="speakers" id="speakers"></div>
+  </section>
 
-    <!-- Настройки дубляжа -->
-    <div class="card" id="setup" hidden>
-        <div class="row">
-            <label class="lbl">Язык</label>
-            <select id="lang">
-                <option value="uz">🇺🇿 Узбекский</option>
-                <option value="ru">🇷🇺 Русский</option>
-                <option value="en">🇬🇧 English</option>
-                <option value="tr">🇹🇷 Türkçe</option>
-                <option value="kk">🇰🇿 Қазақ</option>
-                <option value="ky">🇰🇬 Кыргыз</option>
-                <option value="tg">🇹🇯 Тоҷикӣ</option>
-                <option value="ar">🇸🇦 العربية</option>
-                <option value="de">🇩🇪 Deutsch</option>
-                <option value="fr">🇫🇷 Français</option>
-                <option value="es">🇪🇸 Español</option>
-                <option value="ko">🇰🇷 한국어</option>
-                <option value="ja">🇯🇵 日本語</option>
-            </select>
+  <section class="card" id="phrases-card" hidden>
+    <div class="section-head"><h2>Реплики</h2><span class="count" id="phrase-count"></span></div>
+    <div id="phrases"></div>
+    <button class="btn btn-soft" id="retry" style="margin-top:10px">Переозвучить изменённые/ошибочные</button>
+  </section>
 
-            <label class="lbl">Голос</label>
-            <select id="voice">
-                <option value="Charon">Мужской — глубокий</option>
-                <option value="Puck">Мужской — обычный</option>
-                <option value="Fenrir">Мужской — сильный</option>
-                <option value="Orus">Мужской — спокойный</option>
-                <option value="Kore">Женский — мягкий</option>
-                <option value="Aoede">Женский — живой</option>
-                <option value="Leda">Женский — спокойный</option>
-                <option value="Autonoe">Женский — низкий</option>
-            </select>
-        </div>
-
-        <button class="btn btn-p btn-big" id="go">🎙 Дублировать видео</button>
-
-        <div class="bar" id="bar" hidden><i id="fill"></i></div>
-        <div class="status work" id="st" hidden><span class="spin"></span><span id="st-txt"></span></div>
-    </div>
-
-    <!-- Реплики -->
-    <div class="card" id="phrases" hidden>
-        <div class="head">
-            <h2>Реплики дубляжа</h2>
-            <span class="count" id="cnt"></span>
-        </div>
-        <div id="list"></div>
-        <button class="btn btn-s" id="revoice" style="margin-top:12px">🔄 Переозвучить изменённые</button>
-    </div>
-
-    <!-- Финал -->
-    <div class="card" id="final" hidden>
-        <div class="slider-row">
-            <label class="lbl">Оригинальный звук</label>
-            <input type="range" id="vol" min="0" max="100" value="15">
-            <span class="pct" id="volv">15%</span>
-        </div>
-        <button class="btn btn-g btn-big" id="save">⬇ Скачать готовое видео</button>
-        <div class="status" id="st2" hidden></div>
-    </div>
-
+  <section class="card" id="export-card" hidden>
+    <div class="volume"><span class="label">Оригинальный звук</span><input id="volume" type="range" min="0" max="100" value="15"><span class="percent" id="volume-value">15%</span></div>
+    <button class="btn btn-green btn-main" id="export">Скачать готовое видео</button>
+    <div class="status" id="export-status" hidden></div>
+  </section>
 </div>
 <div class="toasts" id="toasts"></div>
-
 <script>
-// ═══ Состояние ═══
-const S = { file:null, dur:0, segs:[], playing:false, vol:0.15 };
+const $=id=>document.getElementById(id);
+const S={file:null,duration:0,speakers:[],segments:[],apiReady:false,playing:false,volume:.15,runId:0};
+const video=$('video');
+const COLORS=['#7c5cff','#e85d9e','#23a9e8','#e39b36','#1eb987','#e46555','#8c6be8','#69a94b'];
+const VOICES=['Kore','Puck','Charon','Fenrir','Aoede','Leda','Orus','Zephyr','Callirrhoe','Autonoe','Enceladus','Iapetus','Umbriel','Algieba','Despina','Erinome','Algenib','Rasalgethi','Laomedeia','Achernar','Alnilam','Schedar','Gacrux','Pulcherrima','Achird','Zubenelgenubi','Vindemiatrix','Sadachbia','Sadaltager','Sulafat'];
+const fmt=s=>`${Math.floor((s||0)/60)}:${String(Math.floor((s||0)%60)).padStart(2,'0')}`;
+const esc=s=>(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+function toast(type,text){const el=document.createElement('div');el.className='toast '+type;el.textContent=text;$('toasts').appendChild(el);setTimeout(()=>{el.style.opacity=0;el.style.transition='.25s';setTimeout(()=>el.remove(),250)},4000)}
+function errorInfo(payload){let d=payload?.detail??payload??{};if(typeof d==='string')return{message:d,help:[]};return{message:d.message||d.error||'Неизвестная ошибка',help:d.help||[]}}
+function showStatus(kind,text,loading=false,help=[]){const el=$('status');el.hidden=false;el.className='status '+kind;el.innerHTML=(loading?'<span class="spin"></span>':'')+`<div><div>${esc(text)}</div>${help.length?`<ol class="help">${help.map(x=>`<li>${esc(x)}</li>`).join('')}</ol>`:''}</div>`}
+function speaker(id){return S.speakers.find(s=>s.id===id)||{id,label:id,voice:'Kore',delivery:'natural'};}
+function colorFor(id){const i=Math.max(0,S.speakers.findIndex(s=>s.id===id));return COLORS[i%COLORS.length]}
 
-const $ = id => document.getElementById(id);
-const vid = $('vid');
+async function checkApi(){
+  const banner=$('api-error');banner.hidden=true;
+  $('api').className='api';$('api-text').textContent='Проверка Gemini…';
+  try{const d=await(await fetch('/api/diagnostics')).json();S.apiReady=!!d.ok;
+    if(d.transcribeModel&&d.ttsModel)$('model-note').textContent=`${d.transcribeModel} распознаёт спикеров • ${d.ttsModel} озвучивает`;
+    if(d.ok){$('api').className='api ok';$('api-text').textContent='Gemini готов';}
+    else{
+      $('api').className='api err';$('api-text').textContent=d.message||'Gemini недоступен';
+      const info=errorInfo(d);banner.hidden=false;banner.className='status err';
+      banner.innerHTML=`<div><b>${esc(info.message)}</b>${info.help.length?`<ol class="help">${info.help.map(x=>`<li>${esc(x)}</li>`).join('')}</ol>`:''}</div>`;
+    }
+  }catch(e){S.apiReady=false;$('api').className='api err';$('api-text').textContent='Сервер не отвечает';banner.hidden=false;banner.className='status err';banner.textContent='Локальный сервер не отвечает. Перезапустите run.bat.';}
+  $('dub').disabled=!(S.apiReady&&S.file);
+}
+checkApi();
 
-const fmt = s => !s||isNaN(s) ? '0:00' : `${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,'0')}`;
-const esc = s => (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+$('drop').onclick=()=>$('file').click();$('file').onchange=e=>e.target.files[0]&&upload(e.target.files[0]);
+document.addEventListener('dragover',e=>{e.preventDefault();$('drop').classList.add('over')});
+document.addEventListener('dragleave',()=>$('drop').classList.remove('over'));
+document.addEventListener('drop',e=>{e.preventDefault();$('drop').classList.remove('over');if(e.dataTransfer.files[0])upload(e.dataTransfer.files[0])});
+async function upload(file){toast('info','Загрузка видео…');const form=new FormData();form.append('file',file);
+  try{const r=await fetch('/api/upload',{method:'POST',body:form}),d=await r.json();if(!r.ok||!d.ok)throw Error('Не удалось загрузить файл');S.file=d.filename;video.src=d.url;video.hidden=false;$('drop').hidden=true;$('setup').hidden=false;video.volume=S.volume;video.onloadedmetadata=()=>S.duration=video.duration;$('dub').disabled=!S.apiReady;toast('ok','Видео загружено');}catch(e){toast('err',e.message)}}
 
-function toast(kind, msg) {
-    const el = document.createElement('div');
-    el.className = 'toast ' + kind;
-    el.textContent = msg;
-    $('toasts').appendChild(el);
-    setTimeout(() => { el.style.transition='opacity .3s'; el.style.opacity=0; setTimeout(()=>el.remove(),300); }, 3600);
+$('dub').onclick=dub;
+async function dub(){if(!S.file)return;const runId=++S.runId;resetDubbingAudio();S.speakers=[];S.segments=[];$('dub').disabled=true;$('progress').hidden=false;$('progress-fill').style.width='12%';showStatus('work','Распознаю всех людей, перевожу и разделяю реплики…',true);
+  try{const r=await fetch('/api/translate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filename:S.file,lang:$('language').value})});const d=await r.json();if(!r.ok)throw errorInfo(d);if(runId!==S.runId)return;
+    S.speakers=d.speakers||[];S.segments=(d.segments||[]).map((x,i)=>({id:'seg'+i,start:+x.start||0,end:+x.end||(+x.start||0)+2,speaker_id:x.speaker_id||'S1',original:x.original||'',text:x.translated||'',emotion:x.emotion||'neutral',audio:null,url:null,state:'wait',revision:0}));
+    if(!S.segments.length)throw{message:'В видео не найдена речь',help:[]};
+    $('progress-fill').style.width='35%';renderSpeakers();renderPhrases();$('speakers-card').hidden=false;$('phrases-card').hidden=false;toast('ok',`Найдено спикеров: ${S.speakers.length}, реплик: ${S.segments.length}`);await voiceSegments(S.segments,35);$('export-card').hidden=false;
+  }catch(err){const info=err.message?err:errorInfo(err);showStatus('err','Дубляж не запущен: '+info.message,false,info.help||[]);toast('err','Проверьте Gemini API');}
+  finally{$('dub').disabled=!S.apiReady;$('dub').textContent='Дублировать заново';setTimeout(()=>$('progress').hidden=true,1200)}}
+
+function renderSpeakers(){$('speaker-count').textContent=`${S.speakers.length} голос(ов)`;$('speakers').innerHTML=S.speakers.map((s,i)=>`<div class="speaker"><div class="speaker-top"><span class="speaker-color" style="background:${COLORS[i%COLORS.length]}"></span><span class="speaker-name">${esc(s.label||s.id)}</span><span class="speaker-desc" title="${esc(s.delivery)}">${esc(s.voice_character||'neutral')}</span></div><select onchange="changeVoice('${esc(s.id)}',this.value)">${VOICES.map(v=>`<option value="${v}" ${v===s.voice?'selected':''}>${v}</option>`).join('')}</select></div>`).join('')}
+function changeVoice(id,voice){
+  const sp=speaker(id);sp.voice=voice;
+  S.segments.filter(x=>x.speaker_id===id).forEach(x=>{
+    x.revision=(x.revision||0)+1;stopAudio(x.id);delete buffers[x.id];x.audio=null;x.url=null;x.state='wait';
+  });
+  renderPhrases();toast('info',`${sp.label}: выбран ${voice}. Реплики нужно переозвучить`)
 }
 
-function setStatus(kind, text, spinning) {
-    const box = $('st');
-    box.hidden = false;
-    box.className = 'status ' + kind;
-    box.innerHTML = (spinning ? '<span class="spin"></span>' : '') + `<span>${text}</span>`;
+function renderPhrases(){$('phrase-count').textContent=`${S.segments.filter(x=>x.state==='ok').length}/${S.segments.length} готово`;$('phrases').innerHTML=S.segments.map(x=>{const sp=speaker(x.speaker_id),color=colorFor(x.speaker_id);return`<div class="phrase"><span class="time" onclick="jump(${x.start})">${fmt(x.start)}</span><div><span class="speaker-badge" style="background:${color}">${esc(sp.label||sp.id)} · ${esc(sp.voice)}</span>${x.original?`<div class="original">${esc(x.original)}</div>`:''}<textarea rows="1" oninput="editText('${x.id}',this.value)">${esc(x.text)}</textarea>${x.url?`<audio controls src="${x.url}"></audio>`:''}</div><div class="phrase-actions"><span class="state" id="state-${x.id}">${stateIcon(x.state)}</span><button class="btn btn-soft btn-small" onclick="voiceOne('${x.id}')">Озвучить</button></div></div>`}).join('')}
+const stateIcon=s=>s==='ok'?'✅':s==='error'?'❌':s==='work'?'⏳':'○';
+function editText(id,value){const seg=S.segments.find(x=>x.id===id);if(seg&&seg.text!==value){seg.text=value;seg.revision=(seg.revision||0)+1;stopAudio(seg.id);delete buffers[seg.id];seg.audio=null;seg.url=null;seg.state='wait';const el=$('state-'+id);if(el)el.textContent='○'}}
+function jump(time){video.currentTime=time;video.play()}
+
+async function voiceRequest(seg){const sp=speaker(seg.speaker_id);const r=await fetch('/api/voice',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({segments:[{id:seg.id,text:seg.text,voice:sp.voice,delivery:sp.delivery,emotion:seg.emotion,duration:Math.max(.4,seg.end-seg.start)}]})});const d=await r.json();if(!r.ok)throw errorInfo(d);return d.results?.[0]||{ok:false,error:{message:'Пустой ответ'}}}
+async function voiceSegments(segments,base=0){const todo=segments.filter(x=>x.text.trim()&&x.state!=='ok');let done=0,failed=0;showStatus('work',`Озвучиваю ${todo.length} реплик разными голосами…`,true);
+  for(const seg of todo){
+    const revision=seg.revision||0,runId=S.runId,voiceAtStart=speaker(seg.speaker_id).voice;
+    seg.state='work';paint(seg);
+    try{
+      const res=await voiceRequest(seg);
+      if(runId!==S.runId||revision!==(seg.revision||0)||voiceAtStart!==speaker(seg.speaker_id).voice){done++;continue;}
+      if(res.ok){seg.audio=res.filename;seg.url=res.url;seg.state='ok';loadBuffer(seg)}else{seg.state='error';seg.error=errorInfo(res.error);failed++}
+    }catch(e){if(runId===S.runId&&revision===(seg.revision||0)){seg.state='error';seg.error=e.message?e:errorInfo(e);failed++}}
+    done++;paint(seg);$('progress-fill').style.width=(base+(100-base)*done/Math.max(1,todo.length))+'%'
+  }
+  renderPhrases();showStatus(failed===todo.length?'err':'ok',failed?`Готово ${done-failed}/${done}. Ошибок: ${failed}`:`Дубляж готов: ${done} реплик`,false);return failed===0}
+function paint(seg){const el=$('state-'+seg.id);if(el)el.textContent=stateIcon(seg.state);$('phrase-count').textContent=`${S.segments.filter(x=>x.state==='ok').length}/${S.segments.length} готово`}
+async function voiceOne(id){
+  const seg=S.segments.find(x=>x.id===id);if(!seg)return;
+  const revision=seg.revision||0,runId=S.runId,voiceAtStart=speaker(seg.speaker_id).voice;
+  seg.state='work';paint(seg);
+  try{
+    const res=await voiceRequest(seg);
+    if(runId!==S.runId||revision!==(seg.revision||0)||voiceAtStart!==speaker(seg.speaker_id).voice)return;
+    if(res.ok){seg.audio=res.filename;seg.url=res.url;seg.state='ok';loadBuffer(seg);renderPhrases()}
+    else{seg.state='error';paint(seg);toast('err',errorInfo(res.error).message)}
+  }catch(e){if(runId===S.runId&&revision===(seg.revision||0)){seg.state='error';paint(seg);toast('err',e.message||'Ошибка озвучки')}}
 }
+$('retry').onclick=async()=>{const pending=S.segments.filter(x=>x.state!=='ok');if(!pending.length)return toast('info','Все реплики уже готовы');$('progress').hidden=false;$('progress-fill').style.width='0';await voiceSegments(pending,0)};
 
-// ═══ 1. Загрузка видео ═══
-$('drop').onclick = () => $('file').click();
-$('file').onchange = e => e.target.files[0] && upload(e.target.files[0]);
-
-document.addEventListener('dragover', e => { e.preventDefault(); $('drop').classList.add('over'); });
-document.addEventListener('dragleave', () => $('drop').classList.remove('over'));
-document.addEventListener('drop', e => {
-    e.preventDefault(); $('drop').classList.remove('over');
-    if (e.dataTransfer.files[0]) upload(e.dataTransfer.files[0]);
+let context=null;const buffers={},sources={};function audioContext(){if(!context)context=new(window.AudioContext||window.webkitAudioContext)();if(context.state==='suspended')context.resume();return context}
+async function loadBuffer(seg){
+  const revision=seg.revision||0,url=seg.url,runId=S.runId;
+  try{
+    const ctx=audioContext(),data=await(await fetch(url)).arrayBuffer(),buffer=await ctx.decodeAudioData(data);
+    if(runId!==S.runId||revision!==(seg.revision||0)||url!==seg.url)return;
+    const target=Math.max(.25,seg.end-seg.start),rate=Math.max(.05,Math.min(buffer.duration/target,20));
+    buffers[seg.id]={buffer,start:seg.start,end:seg.end,rate};
+  }catch(e){console.warn(e)}
+}
+video.addEventListener('play',()=>{S.playing=true;audioContext()});video.addEventListener('pause',()=>{S.playing=false;stopAll()});video.addEventListener('seeking',stopAll);video.addEventListener('timeupdate',()=>{
+  if(!S.playing)return;const t=video.currentTime;
+  for(const seg of S.segments){const info=buffers[seg.id];if(!info)continue;const inside=t>=info.start&&t<info.end;if(inside&&!sources[seg.id])startAudio(seg.id,t-info.start);else if(!inside&&sources[seg.id])stopAudio(seg.id)}
 });
-
-async function upload(f) {
-    toast('i', 'Загружаю видео…');
-    const fd = new FormData(); fd.append('file', f);
-    try {
-        const r = await fetch('/api/upload', { method:'POST', body:fd });
-        const d = await r.json();
-        if (!d.ok) throw new Error('не удалось загрузить');
-
-        S.file = d.filename;
-        vid.src = d.url;
-        vid.hidden = false;
-        vid.volume = S.vol;
-        $('drop').hidden = true;
-        $('setup').hidden = false;
-        vid.onloadedmetadata = () => { S.dur = vid.duration; };
-        toast('o', 'Видео загружено');
-    } catch (err) { toast('e', err.message); }
+function startAudio(id,timelineOffset){
+  const ctx=audioContext(),info=buffers[id],src=ctx.createBufferSource();src.buffer=info.buffer;src.playbackRate.value=info.rate;src.connect(ctx.destination);src.start(0,Math.max(0,timelineOffset*info.rate));sources[id]=src;src.onended=()=>delete sources[id]
+}
+function stopAudio(id){try{sources[id]?.stop()}catch{}delete sources[id]}
+function stopAll(){Object.keys(sources).forEach(stopAudio)}
+function resetDubbingAudio(){
+  stopAll();Object.keys(buffers).forEach(id=>delete buffers[id]);
+  $('speakers-card').hidden=true;$('phrases-card').hidden=true;$('export-card').hidden=true;
 }
 
-// ═══ 2. Дубляж: перевод + озвучка одной кнопкой ═══
-$('go').onclick = dub;
-
-async function dub() {
-    if (!S.file) return;
-    const lang  = $('lang').value;
-    const voice = $('voice').value;
-
-    $('go').disabled = true;
-    $('bar').hidden = false;
-    $('fill').style.width = '10%';
-    setStatus('work', 'Слушаю видео и перевожу… (это занимает 30–90 сек)', true);
-
-    // — Шаг 1: распознать + перевести
-    try {
-        const r = await fetch('/api/translate', {
-            method:'POST', headers:{'Content-Type':'application/json'},
-            body: JSON.stringify({ filename:S.file, lang })
-        });
-        const d = await r.json();
-        if (!r.ok) throw new Error(d.detail || `ошибка ${r.status}`);
-
-        S.segs = (d.segments || []).map((s,i) => ({
-            id:'s'+i, start:+s.start||0, end:+s.end||0,
-            original:s.original||'', text:s.translated||'',
-            audio:null, url:null, state:'wait'
-        }));
-
-        if (!S.segs.length) throw new Error('в видео не найдено речи');
-
-        $('fill').style.width = '35%';
-        renderPhrases();
-        $('phrases').hidden = false;
-        toast('o', `Переведено реплик: ${S.segs.length}`);
-    } catch (err) {
-        setStatus('err', 'Перевод не удался: ' + err.message, false);
-        $('go').disabled = false;
-        return;
-    }
-
-    // — Шаг 2: озвучить всё
-    await voiceAll(voice, 35);
-
-    $('go').disabled = false;
-    $('go').textContent = '🔄 Дублировать заново';
-    $('final').hidden = false;
-}
-
-// Озвучка списка реплик (по одной, с прогрессом)
-async function voiceAll(voice, baseProgress) {
-    setStatus('work', 'Озвучиваю реплики…', true);
-
-    const todo = S.segs.filter(s => s.text.trim());
-    let done = 0, bad = 0;
-
-    for (const seg of todo) {
-        seg.state = 'work';
-        paintPhrase(seg);
-        try {
-            const r = await fetch('/api/voice', {
-                method:'POST', headers:{'Content-Type':'application/json'},
-                body: JSON.stringify({ segments:[{ id:seg.id, text:seg.text }], voice })
-            });
-            const d = await r.json();
-            const res = (d.results || [])[0] || {};
-            if (res.ok) { seg.url = res.url; seg.audio = res.filename; seg.state = 'ok'; loadBuffer(seg); }
-            else { seg.state = 'err'; bad++; }
-        } catch { seg.state = 'err'; bad++; }
-
-        done++;
-        paintPhrase(seg);
-        $('fill').style.width = (baseProgress + (100-baseProgress) * done/todo.length) + '%';
-    }
-
-    if (bad === 0) setStatus('ok', `Дубляж готов — ${done} реплик озвучено`, false);
-    else setStatus(bad === done ? 'err' : 'ok', `Озвучено ${done-bad} из ${done} (${bad} с ошибкой)`, false);
-
-    renderPhrases();
-    setTimeout(() => { $('bar').hidden = true; $('fill').style.width='0'; }, 1500);
-}
-
-// Переозвучить только изменённые/неудачные
-$('revoice').onclick = async () => {
-    const pending = S.segs.filter(s => s.state !== 'ok' && s.text.trim());
-    if (!pending.length) { toast('i','Нечего переозвучивать'); return; }
-    $('bar').hidden = false;
-    await voiceAll($('voice').value, 0);
-};
-
-// ═══ Список реплик ═══
-function renderPhrases() {
-    $('cnt').textContent = `${S.segs.filter(s=>s.state==='ok').length} / ${S.segs.length} озвучено`;
-    $('list').innerHTML = S.segs.map(s => `
-        <div class="ph" id="ph-${s.id}">
-            <div class="ph-t" onclick="jump(${s.start})">${fmt(s.start)}</div>
-            <div class="ph-b">
-                ${s.original ? `<div class="ph-o">${esc(s.original)}</div>` : ''}
-                <textarea rows="1" oninput="editPhrase('${s.id}',this.value)">${esc(s.text)}</textarea>
-                ${s.url ? `<audio controls src="${s.url}"></audio>` : ''}
-            </div>
-            <div class="ph-r">
-                <span class="dot" id="dot-${s.id}">${dotFor(s.state)}</span>
-                <button class="btn btn-s" onclick="revoiceOne('${s.id}')">🎙</button>
-            </div>
-        </div>`).join('');
-}
-
-const dotFor = st => st==='ok' ? '✅' : st==='err' ? '❌' : st==='work' ? '⏳' : '⚪';
-
-function paintPhrase(seg) {
-    const dot = $('dot-'+seg.id);
-    if (dot) dot.textContent = dotFor(seg.state);
-    $('cnt').textContent = `${S.segs.filter(s=>s.state==='ok').length} / ${S.segs.length} озвучено`;
-}
-
-function editPhrase(id, val) {
-    const s = S.segs.find(x => x.id === id);
-    if (s && s.text !== val) { s.text = val; s.state = 'wait'; paintPhrase(s); }
-}
-
-async function revoiceOne(id) {
-    const seg = S.segs.find(s => s.id === id);
-    if (!seg || !seg.text.trim()) return;
-    seg.state = 'work'; paintPhrase(seg);
-    try {
-        const r = await fetch('/api/voice', {
-            method:'POST', headers:{'Content-Type':'application/json'},
-            body: JSON.stringify({ segments:[{ id:seg.id, text:seg.text }], voice:$('voice').value })
-        });
-        const res = ((await r.json()).results || [])[0] || {};
-        if (res.ok) { seg.url = res.url; seg.audio = res.filename; seg.state='ok'; loadBuffer(seg); renderPhrases(); }
-        else { seg.state='err'; paintPhrase(seg); toast('e', res.error || 'ошибка озвучки'); }
-    } catch (e) { seg.state='err'; paintPhrase(seg); toast('e', e.message); }
-}
-
-function jump(t) { vid.currentTime = t; vid.play(); }
-
-// ═══ Синхронное воспроизведение дубляжа с видео ═══
-let ctx = null;
-const buffers = {}, playing = {};
-
-const audioCtx = () => {
-    if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)();
-    if (ctx.state === 'suspended') ctx.resume();
-    return ctx;
-};
-
-async function loadBuffer(seg) {
-    try {
-        const c = audioCtx();
-        const buf = await c.decodeAudioData(await (await fetch(seg.url)).arrayBuffer());
-        buffers[seg.id] = { buf, start: seg.start };
-    } catch (e) { console.warn('decode fail', e); }
-}
-
-vid.addEventListener('play',  () => { S.playing = true;  audioCtx(); });
-vid.addEventListener('pause', () => { S.playing = false; stopAll(); });
-vid.addEventListener('seeking', stopAll);
-vid.addEventListener('timeupdate', () => {
-    if (!S.playing) return;
-    const t = vid.currentTime;
-    for (const s of S.segs) {
-        const info = buffers[s.id];
-        if (!info) continue;
-        const inside = t >= info.start && t < info.start + info.buf.duration;
-        if (inside && !playing[s.id]) start(s.id, t - info.start);
-        else if (!inside && playing[s.id]) stop(s.id);
-    }
-});
-
-function start(id, offset) {
-    const c = audioCtx();
-    const src = c.createBufferSource();
-    src.buffer = buffers[id].buf;
-    src.connect(c.destination);
-    src.start(0, Math.max(0, offset));
-    playing[id] = src;
-    src.onended = () => delete playing[id];
-}
-function stop(id) { try { playing[id]?.stop(); } catch {} delete playing[id]; }
-function stopAll() { Object.keys(playing).forEach(stop); }
-
-// ═══ Громкость оригинала ═══
-$('vol').oninput = e => {
-    S.vol = e.target.value / 100;
-    vid.volume = S.vol;
-    $('volv').textContent = e.target.value + '%';
-};
-
-// ═══ Экспорт ═══
-$('save').onclick = async () => {
-    const ready = S.segs.filter(s => s.audio);
-    if (!ready.length) { toast('e','Сначала озвучь реплики'); return; }
-
-    const box = $('st2');
-    box.hidden = false;
-    box.className = 'status work';
-    box.innerHTML = '<span class="spin"></span><span>Собираю видео с дубляжом…</span>';
-    $('save').disabled = true;
-
-    try {
-        const r = await fetch('/api/export', {
-            method:'POST', headers:{'Content-Type':'application/json'},
-            body: JSON.stringify({
-                video: S.file,
-                segments: ready.map(s => ({ audio:s.audio, start:s.start })),
-                originalVolume: S.vol
-            })
-        });
-        const d = await r.json();
-        if (d.ok) {
-            box.className = 'status ok';
-            box.innerHTML = `<span>Готово!</span> <a class="dl" href="${d.url}" download>Скачать видео</a>`;
-            toast('o','Дубляж собран');
-        } else {
-            box.className = 'status err';
-            box.textContent = d.error;
-            toast('e','Ошибка сборки');
-        }
-    } catch (e) {
-        box.className = 'status err';
-        box.textContent = e.message;
-    } finally { $('save').disabled = false; }
-};
+$('volume').oninput=e=>{S.volume=e.target.value/100;video.volume=S.volume;$('volume-value').textContent=e.target.value+'%'};
+$('export').onclick=async()=>{const ready=S.segments.filter(x=>x.audio);if(!ready.length)return toast('err','Нет готовых реплик');$('export').disabled=true;const box=$('export-status');box.hidden=false;box.className='status work';box.innerHTML='<span class="spin"></span><span>Подгоняю реплики по таймингам и собираю видео…</span>';
+  try{const r=await fetch('/api/export',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({video:S.file,originalVolume:S.volume,segments:ready.map(x=>({audio:x.audio,start:x.start,end:x.end}))})}),d=await r.json();if(!r.ok||!d.ok)throw Error(d.error||'Экспорт не удался');box.className='status ok';box.innerHTML=`Готово. <a class="download" href="${d.url}" download>Скачать ${esc(d.filename)}</a>`;toast('ok','Видео готово')}catch(e){box.className='status err';box.textContent=e.message;toast('err','Ошибка экспорта')}finally{$('export').disabled=false}};
 </script>
 </body>
 </html>
