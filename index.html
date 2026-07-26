@@ -23,8 +23,8 @@ button,select,textarea,input{font:inherit}.btn{border:0;border-radius:9px;paddin
 <body>
 <div class="wrap">
   <header class="top">
-    <div><div class="brand">Jar<b>Cut</b> <span style="font-size:10px;color:#8c93a3;font-weight:600">v3.2 DIRECT API</span></div><div class="tagline">Видео → профессиональный дубляж • без проверки ListModels</div></div>
-    <div class="api" id="api"><span class="api-dot"></span><span id="api-text">Проверка Gemini…</span><button class="btn btn-soft btn-small" onclick="checkApi()">Проверить</button></div>
+    <div><div class="brand">Jar<b>Cut</b> <span style="font-size:10px;color:#8c93a3;font-weight:600">v4 VERTEX AI</span></div><div class="tagline">Видео → профессиональный дубляж • Vertex AI Gemini 3.1</div></div>
+    <div class="api" id="api"><span class="api-dot"></span><span id="api-text">Проверка Vertex AI…</span><button class="btn btn-soft btn-small" onclick="checkApi()">Проверить</button></div>
   </header>
   <div class="status" id="api-error" hidden></div>
 
@@ -51,7 +51,7 @@ button,select,textarea,input{font:inherit}.btn{border:0;border-radius:9px;paddin
     <button class="btn btn-main" id="dub" disabled>Дублировать видео</button>
     <div class="bar" id="progress" hidden><i id="progress-fill"></i></div>
     <div class="status" id="status" hidden></div>
-    <div class="model-note" id="model-note">Проверяю доступные модели Gemini…</div>
+    <div class="model-note" id="model-note">Проверяю Vertex AI и модели Gemini 3.1…</div>
   </section>
 
   <section class="card" id="speakers-card" hidden>
@@ -88,19 +88,20 @@ function colorFor(id){const i=Math.max(0,S.speakers.findIndex(s=>s.id===id));ret
 
 async function checkApi(){
   const banner=$('api-error');banner.hidden=true;
-  $('api').className='api';$('api-text').textContent='Проверка GenerateContent…';
+  $('api').className='api';$('api-text').textContent='Проверка Vertex AI…';
   try{
     const response=await fetch('/api/diagnostics',{cache:'no-store'}),d=await response.json();
     S.apiReady=!!d.ok;
-    if(d.transcribeModel&&d.ttsModel)$('model-note').textContent=`Проверка: ${d.transcribeModel}:GenerateContent • Озвучка: ${d.ttsModel}`;
+    const target=d.mode==='standard'?`${d.project||'без проекта'} / ${d.location||'global'}`:'Express Mode';
+    if(d.transcribeModel&&d.ttsModel)$('model-note').textContent=`Vertex AI ${target} • ${d.transcribeModel} • TTS: ${d.ttsModel}`;
     if(d.ok){
-      $('api').className='api ok';$('api-text').textContent='GenerateContent готов';
-      banner.hidden=false;banner.className='status ok';banner.textContent=d.message||'Gemini готов к дубляжу';
+      $('api').className='api ok';$('api-text').textContent=`Vertex AI: ${d.mode||'готов'}`;
+      banner.hidden=false;banner.className='status ok';banner.textContent=d.message||'Vertex AI готов к дубляжу';
       setTimeout(()=>{if(S.apiReady)banner.hidden=true},3500);
     }else{
-      $('api').className='api err';$('api-text').textContent='GenerateContent заблокирован';
+      $('api').className='api err';$('api-text').textContent='Vertex AI недоступен';
       const info=errorInfo(d);banner.hidden=false;banner.className='status err';
-      banner.innerHTML=`<div><b>${esc(info.message)}</b>${info.help.length?`<ol class="help">${info.help.map(x=>`<li>${esc(x)}</li>`).join('')}</ol>`:''}<div class="api-links"><a class="btn btn-soft btn-small" target="_blank" rel="noopener" href="https://console.cloud.google.com/apis/library/generativelanguage.googleapis.com">Открыть Google Cloud</a><a class="btn btn-soft btn-small" target="_blank" rel="noopener" href="https://aistudio.google.com/apikey">Создать новый ключ</a><button class="btn btn-soft btn-small" onclick="checkApi()">Повторить проверку</button></div></div>`;
+      banner.innerHTML=`<div><b>${esc(info.message)}</b>${info.help.length?`<ol class="help">${info.help.map(x=>`<li>${esc(x)}</li>`).join('')}</ol>`:''}<div class="api-links"><a class="btn btn-soft btn-small" target="_blank" rel="noopener" href="https://console.cloud.google.com/apis/library/aiplatform.googleapis.com">Включить Vertex AI API</a><a class="btn btn-soft btn-small" target="_blank" rel="noopener" href="https://cloud.google.com/vertex-ai/generative-ai/docs/start/api-keys">Документация ключа</a><button class="btn btn-soft btn-small" onclick="checkApi()">Повторить проверку</button></div></div>`;
     }
   }catch(e){
     S.apiReady=false;$('api').className='api err';$('api-text').textContent='Локальный сервер недоступен';banner.hidden=false;banner.className='status err';banner.innerHTML='<div>Локальный сервер не отвечает.<div class="api-links"><button class="btn btn-soft btn-small" onclick="checkApi()">Повторить</button></div></div>';
@@ -122,7 +123,7 @@ async function dub(){if(!S.file)return;const runId=++S.runId;resetDubbingAudio()
     S.speakers=d.speakers||[];S.segments=(d.segments||[]).map((x,i)=>({id:'seg'+i,start:+x.start||0,end:+x.end||(+x.start||0)+2,speaker_id:x.speaker_id||'S1',original:x.original||'',text:x.translated||'',emotion:x.emotion||'neutral',audio:null,url:null,state:'wait',revision:0}));
     if(!S.segments.length)throw{message:'В видео не найдена речь',help:[]};
     $('progress-fill').style.width='35%';renderSpeakers();renderPhrases();$('speakers-card').hidden=false;$('phrases-card').hidden=false;toast('ok',`Найдено спикеров: ${S.speakers.length}, реплик: ${S.segments.length}`);await voiceSegments(S.segments,35);$('export-card').hidden=false;
-  }catch(err){const info=err.message?err:errorInfo(err);showStatus('err','Дубляж не запущен: '+info.message,false,info.help||[]);toast('err','Проверьте Gemini API');}
+  }catch(err){const info=err.message?err:errorInfo(err);showStatus('err','Дубляж не запущен: '+info.message,false,info.help||[]);toast('err','Проверьте Vertex AI');}
   finally{$('dub').disabled=!S.apiReady;$('dub').textContent='Дублировать заново';setTimeout(()=>$('progress').hidden=true,1200)}}
 
 function renderSpeakers(){$('speaker-count').textContent=`${S.speakers.length} голос(ов)`;$('speakers').innerHTML=S.speakers.map((s,i)=>`<div class="speaker"><div class="speaker-top"><span class="speaker-color" style="background:${COLORS[i%COLORS.length]}"></span><span class="speaker-name">${esc(s.label||s.id)}</span><span class="speaker-desc" title="${esc(s.delivery)}">${esc(s.voice_character||'neutral')}</span></div><select onchange="changeVoice('${esc(s.id)}',this.value)">${VOICES.map(v=>`<option value="${v}" ${v===s.voice?'selected':''}>${v}</option>`).join('')}</select></div>`).join('')}

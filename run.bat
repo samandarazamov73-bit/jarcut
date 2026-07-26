@@ -8,10 +8,19 @@ echo.
 cd /d "%~dp0"
 
 if not exist .env (
-    echo GEMINI_API_KEY=ваш_ключ_сюда> .env
-    echo   Создан файл .env.
-    echo   Вставьте в него Gemini API key и снова запустите run.bat.
-    echo   https://aistudio.google.com/apikey
+    (
+        echo # Vertex AI Express Mode ^(для Standard Mode измените настройки ниже^)
+        echo # Standard Mode: project ID + Vertex key bound to a service account
+        echo VERTEX_API_KEY=ваш_vertex_ключ
+        echo VERTEX_MODE=express
+        echo VERTEX_PROJECT_ID=
+        echo VERTEX_LOCATION=global
+    )> .env
+    echo   Создан файл .env для Vertex AI.
+    echo   Вставьте Vertex API key в VERTEX_API_KEY и снова запустите run.bat.
+    echo   https://cloud.google.com/vertex-ai/generative-ai/docs/start/api-keys
+    echo.
+    echo   Standard Mode: VERTEX_MODE=standard, VERTEX_PROJECT_ID и ключ, привязанный к service account.
     echo.
     pause
     exit /b 1

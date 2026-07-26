@@ -1,10 +1,9 @@
-"""JarCut — локальный автоматический дубляж видео на Gemini 3.1.
+"""JarCut — локальный автоматический дубляж видео через Vertex AI Gemini 3.1.
 
 Запуск: python server.py
 Открыть: http://localhost:8000
 """
 
-import asyncio
 import base64
 import json
 import os
@@ -23,10 +22,20 @@ from fastapi.staticfiles import StaticFiles
 
 load_dotenv()
 
-API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-API_ROOT = "https://generativelanguage.googleapis.com"
-TRANSCRIBE_MODEL = os.getenv("GEMINI_TRANSCRIBE_MODEL", "gemini-3.1-pro-preview")
-TTS_MODEL = os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview")
+# Vertex AI credentials. GEMINI_API_KEY remains a backward-compatible alias so
+# existing local .env files keep working when that value is actually a Vertex key.
+API_KEY = (os.getenv("VERTEX_API_KEY") or os.getenv("GEMINI_API_KEY", "")).strip()
+VERTEX_MODE = os.getenv("VERTEX_MODE", "auto").strip().lower()
+VERTEX_PROJECT_ID = os.getenv("VERTEX_PROJECT_ID", "").strip()
+VERTEX_LOCATION = os.getenv("VERTEX_LOCATION", "global").strip() or "global"
+TRANSCRIBE_MODEL = os.getenv(
+    "VERTEX_TRANSCRIBE_MODEL",
+    os.getenv("GEMINI_TRANSCRIBE_MODEL", "gemini-3.1-pro-preview"),
+)
+TTS_MODEL = os.getenv(
+    "VERTEX_TTS_MODEL",
+    os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
+)
 
 BASE = Path(__file__).resolve().parent
 UPLOADS = BASE / "uploads"
@@ -34,7 +43,7 @@ EXPORTS = BASE / "exports"
 for directory in (UPLOADS, EXPORTS):
     directory.mkdir(exist_ok=True)
 
-app = FastAPI(title="JarCut", version="3.0")
+app = FastAPI(title="JarCut", version="4.0")
 
 LANGS = {
     "uz": "Uzbek (O'zbek tili)", "ru": "Russian", "en": "English",
@@ -71,12 +80,52 @@ async def root() -> FileResponse:
     return FileResponse(str(BASE / "index.html"))
 
 
-def gemini_headers() -> dict[str, str]:
+def resolved_vertex_mode() -> str:
+    if VERTEX_MODE in {"express", "standard"}:
+        return VERTEX_MODE
+    if VERTEX_MODE == "auto":
+        return "standard" if VERTEX_PROJECT_ID else "express"
+    raise ValueError(
+        "VERTEX_MODE должен быть express, standard или auto "
+        f"(сейчас: {VERTEX_MODE or 'пусто'})"
+    )
+
+
+def vertex_model_url(model: str) -> str:
+    """Build a Vertex AI Express or Standard GenerateContent endpoint."""
+    mode = resolved_vertex_mode()
+    if mode == "express":
+        return f"https://aiplatform.googleapis.com/v1/publishers/google/models/{model}:generateContent"
+
+    if not VERTEX_PROJECT_ID:
+        raise ValueError("Для VERTEX_MODE=standard укажите VERTEX_PROJECT_ID в .env")
+    if VERTEX_LOCATION == "global":
+        host = "https://aiplatform.googleapis.com"
+    else:
+        host = f"https://{VERTEX_LOCATION}-aiplatform.googleapis.com"
+    return (
+        f"{host}/v1/projects/{VERTEX_PROJECT_ID}/locations/{VERTEX_LOCATION}"
+        f"/publishers/google/models/{model}:generateContent"
+    )
+
+
+def vertex_headers() -> dict[str, str]:
     return {"Content-Type": "application/json", "x-goog-api-key": API_KEY}
 
 
+def vertex_public_config() -> dict[str, str]:
+    return {
+        "backend": "Vertex AI",
+        "mode": resolved_vertex_mode(),
+        "project": VERTEX_PROJECT_ID or "express-mode",
+        "location": VERTEX_LOCATION if resolved_vertex_mode() == "standard" else "global",
+        "transcribeModel": TRANSCRIBE_MODEL,
+        "ttsModel": TTS_MODEL,
+    }
+
+
 def api_error(response: httpx.Response, action: str) -> HTTPException:
-    """Translate Gemini errors to actionable messages without exposing the key."""
+    """Translate Vertex AI errors into actionable messages without exposing the key."""
     try:
         payload = response.json()
         error = payload.get("error", {})
@@ -90,48 +139,44 @@ def api_error(response: httpx.Response, action: str) -> HTTPException:
         message = response.text[:300]
         reasons = []
 
-    if response.status_code == 403:
-        service_blocked = (
-            "API_KEY_SERVICE_BLOCKED" in reasons
-            or "Requests to this API" in message
-            or "are blocked" in message
-        )
-        if service_blocked:
+    mode = resolved_vertex_mode()
+    if response.status_code in (401, 403):
+        if mode == "express":
             help_steps = [
-                "Откройте https://console.cloud.google.com/apis/library/generativelanguage.googleapis.com и выберите тот же проект, где создан ключ.",
-                "Нажмите Enable для Generative Language API, если API ещё не включён.",
-                "Откройте APIs & Services → Credentials → ваш API key.",
-                "В API restrictions выберите Restrict key и разрешите Generative Language API.",
-                "Для локального Python-сервера не используйте ограничение Website/HTTP referrers; после сохранения подождите несколько минут.",
-                "После изменения ключа в .env перезапустите python server.py (или run.bat).",
-                "Если проект управляется организацией или Workspace и блокировка остаётся — создайте личный Google Cloud проект и новый ключ.",
+                "Проверьте, что VERTEX_API_KEY — ключ Vertex AI Express Mode, а не Google AI Studio.",
+                "Если ключ ограничен, разрешите ему Vertex AI API (aiplatform.googleapis.com).",
+                "Для локального Python-сервера не используйте ограничение Website/HTTP referrers.",
+                "После изменения .env полностью перезапустите run.bat.",
             ]
-            code = "API_KEY_SERVICE_BLOCKED"
         else:
             help_steps = [
-                "Проверьте, что ключ создан в Google AI Studio или Google Cloud проекте с включённым Gemini API.",
-                "Проверьте billing и доступ Preview-моделей для выбранного проекта и региона.",
-                "Если Google сообщает, что проекту отказано в доступе, создайте новый личный Cloud-проект или обратитесь в Google Cloud Support.",
+                "Включите Vertex AI API: https://console.cloud.google.com/apis/library/aiplatform.googleapis.com",
+                "Проверьте, что Vertex API key привязан к service account с доступом Vertex AI User.",
+                "Проверьте VERTEX_PROJECT_ID и убедитесь, что ключ создан в этом же Google Cloud проекте.",
+                "В ограничениях ключа разрешите Vertex AI API (aiplatform.googleapis.com).",
+                "Проверьте billing, доступ к моделям и VERTEX_LOCATION; затем перезапустите run.bat.",
             ]
-            code = "GEMINI_PERMISSION_DENIED"
         return HTTPException(
-            status_code=403,
+            status_code=response.status_code,
             detail={
-                "code": code,
-                "message": f"Gemini запретил {action}: {message}",
+                "code": "VERTEX_PERMISSION_DENIED",
+                "message": f"Vertex AI запретил {action}: {message}",
                 "help": help_steps,
                 "action": action,
                 "reasons": reasons,
             },
         )
 
-    if response.status_code == 400 and "API key" in message:
+    if response.status_code == 400 and ("API key" in message or "api key" in message.lower()):
         return HTTPException(
             status_code=400,
             detail={
-                "code": "INVALID_API_KEY",
+                "code": "INVALID_VERTEX_API_KEY",
                 "message": message,
-                "help": ["Создайте новый ключ: https://aistudio.google.com/apikey и вставьте его в .env без кавычек и пробелов."],
+                "help": [
+                    "Вставьте действующий Vertex AI API key в VERTEX_API_KEY без кавычек и пробелов.",
+                    "Документация: https://cloud.google.com/vertex-ai/generative-ai/docs/start/api-keys",
+                ],
                 "action": action,
             },
         )
@@ -140,11 +185,11 @@ def api_error(response: httpx.Response, action: str) -> HTTPException:
         return HTTPException(
             status_code=404,
             detail={
-                "code": "MODEL_NOT_AVAILABLE",
-                "message": f"Модель недоступна для этого ключа: {message}",
+                "code": "VERTEX_MODEL_NOT_AVAILABLE",
+                "message": f"Vertex AI не нашёл модель или endpoint: {message}",
                 "help": [
-                    f"Проверьте доступ к {TRANSCRIBE_MODEL} и {TTS_MODEL} в Google AI Studio.",
-                    "Preview-модели могут требовать billing или быть недоступны в вашем регионе.",
+                    f"Проверьте доступ проекта к {TRANSCRIBE_MODEL} и {TTS_MODEL}.",
+                    "Для Standard Mode попробуйте VERTEX_LOCATION=global и проверьте VERTEX_PROJECT_ID.",
                 ],
                 "action": action,
             },
@@ -152,44 +197,66 @@ def api_error(response: httpx.Response, action: str) -> HTTPException:
 
     return HTTPException(
         status_code=response.status_code,
-        detail={"code": "GEMINI_ERROR", "message": message, "help": [], "action": action},
+        detail={"code": "VERTEX_ERROR", "message": message, "help": [], "action": action},
     )
 
 
 @app.get("/api/diagnostics")
 async def diagnostics() -> dict[str, Any]:
-    """Test the exact GenerateContent method JarCut uses; never call ListModels."""
+    """Test the exact Vertex GenerateContent method JarCut uses."""
+    try:
+        public_config = vertex_public_config()
+    except ValueError as exc:
+        return {
+            "backend": "Vertex AI",
+            "mode": VERTEX_MODE or "invalid",
+            "project": VERTEX_PROJECT_ID or "not-set",
+            "location": VERTEX_LOCATION,
+            "transcribeModel": TRANSCRIBE_MODEL,
+            "ttsModel": TTS_MODEL,
+            "checkMethod": "GenerateContent",
+            "ok": False,
+            "code": "VERTEX_CONFIG_ERROR",
+            "message": str(exc),
+            "help": ["Укажите VERTEX_MODE=express, standard или auto в .env."],
+        }
+
     base_result = {
-        "transcribeModel": TRANSCRIBE_MODEL,
-        "ttsModel": TTS_MODEL,
+        **public_config,
         "checkMethod": "GenerateContent",
     }
-    if not API_KEY or API_KEY == "ваш_ключ_сюда":
+    if not API_KEY or API_KEY in {"ваш_ключ_сюда", "ваш_vertex_ключ"}:
         return {
             **base_result,
             "ok": False,
             "code": "NO_KEY",
-            "message": "В .env не вставлен GEMINI_API_KEY.",
-            "help": ["Создайте ключ на https://aistudio.google.com/apikey и вставьте: GEMINI_API_KEY=ваш_ключ"],
+            "message": "В .env не вставлен VERTEX_API_KEY.",
+            "help": ["Вставьте ключ: VERTEX_API_KEY=ваш_vertex_ключ и перезапустите run.bat."],
+        }
+    try:
+        endpoint = vertex_model_url(TRANSCRIBE_MODEL)
+    except ValueError as exc:
+        return {
+            **base_result,
+            "ok": False,
+            "code": "VERTEX_CONFIG_ERROR",
+            "message": str(exc),
+            "help": ["Добавьте VERTEX_PROJECT_ID в .env или переключите VERTEX_MODE=express."],
         }
 
     payload = {
-        "contents": [{"parts": [{"text": "Reply with exactly OK."}]}],
+        "contents": [{"role": "user", "parts": [{"text": "Reply with exactly OK."}]}],
         "generationConfig": {"temperature": 0, "maxOutputTokens": 128},
     }
     try:
         async with httpx.AsyncClient(timeout=45) as client:
-            response = await client.post(
-                f"{API_ROOT}/v1beta/models/{TRANSCRIBE_MODEL}:generateContent",
-                headers=gemini_headers(),
-                json=payload,
-            )
+            response = await client.post(endpoint, headers=vertex_headers(), json=payload)
     except httpx.RequestError as exc:
         return {
             **base_result,
             "ok": False,
-            "code": "GEMINI_UNREACHABLE",
-            "message": f"Сервер Google Gemini недоступен: {exc}",
+            "code": "VERTEX_UNREACHABLE",
+            "message": f"Vertex AI недоступен: {exc}",
             "help": ["Проверьте интернет, VPN/прокси и нажмите «Проверить» ещё раз."],
             "retryable": True,
         }
@@ -204,7 +271,7 @@ async def diagnostics() -> dict[str, Any]:
         "keyValid": True,
         "generateContentAvailable": True,
         "ttsUnchecked": True,
-        "message": f"{TRANSCRIBE_MODEL}: GenerateContent работает. TTS проверится при первой озвучке.",
+        "message": f"Vertex AI {TRANSCRIBE_MODEL}: GenerateContent работает. TTS проверится при первой озвучке.",
         "help": [],
     }
 
@@ -222,69 +289,13 @@ def extract_audio(source: Path, target: Path) -> bool:
     """Create a compact mono audio track for reliable transcription and diarization."""
     command = [
         "ffmpeg", "-y", "-i", str(source), "-vn", "-ac", "1", "-ar", "16000",
-        "-codec:a", "libmp3lame", "-b:a", "64k", str(target),
+        "-codec:a", "libmp3lame", "-b:a", "32k", str(target),
     ]
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=600)
         return result.returncode == 0 and target.exists() and target.stat().st_size > 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
-
-
-async def upload_gemini_file(client: httpx.AsyncClient, path: Path, mime: str) -> str:
-    """Upload larger audio through the resumable Gemini Files API."""
-    start_headers = {
-        "x-goog-api-key": API_KEY,
-        "X-Goog-Upload-Protocol": "resumable",
-        "X-Goog-Upload-Command": "start",
-        "X-Goog-Upload-Header-Content-Length": str(path.stat().st_size),
-        "X-Goog-Upload-Header-Content-Type": mime,
-        "Content-Type": "application/json",
-    }
-    start = await client.post(
-        f"{API_ROOT}/upload/v1beta/files",
-        headers=start_headers,
-        json={"file": {"displayName": path.name}},
-    )
-    if start.status_code not in (200, 201):
-        raise api_error(start, "file_upload")
-
-    upload_url = start.headers.get("X-Goog-Upload-URL")
-    if not upload_url:
-        raise HTTPException(500, "Gemini не вернул адрес загрузки файла")
-
-    upload = await client.post(
-        upload_url,
-        headers={
-            "X-Goog-Upload-Offset": "0",
-            "X-Goog-Upload-Command": "upload, finalize",
-            "Content-Length": str(path.stat().st_size),
-        },
-        content=path.read_bytes(),
-    )
-    if upload.status_code not in (200, 201):
-        raise api_error(upload, "file_upload")
-
-    file_info = upload.json().get("file", {})
-    uri = file_info.get("uri", "")
-    name = file_info.get("name", "")
-    state = file_info.get("state", "ACTIVE")
-    for _ in range(60):
-        if state == "ACTIVE":
-            return uri
-        if state == "FAILED":
-            raise HTTPException(500, "Gemini не смог обработать загруженное аудио")
-        if not name:
-            break
-        await asyncio.sleep(2)
-        status = await client.get(f"{API_ROOT}/v1beta/{name}", headers={"x-goog-api-key": API_KEY})
-        if status.status_code != 200:
-            raise api_error(status, "file_processing")
-        file_info = status.json()
-        uri = file_info.get("uri", uri)
-        state = file_info.get("state", "")
-
-    raise HTTPException(504, "Gemini слишком долго обрабатывает аудио")
 
 
 def professional_prompt(target_language: str) -> str:
@@ -349,8 +360,8 @@ def assign_speaker_voices(speakers: list[dict[str, Any]]) -> list[dict[str, Any]
 @app.post("/api/translate")
 async def translate(request: Request) -> dict[str, Any]:
     """Transcribe, translate and diarize all audible speakers."""
-    if not API_KEY or API_KEY == "ваш_ключ_сюда":
-        raise HTTPException(500, {"code": "NO_KEY", "message": "Вставьте Gemini API key в .env", "help": []})
+    if not API_KEY or API_KEY in {"ваш_ключ_сюда", "ваш_vertex_ключ"}:
+        raise HTTPException(500, {"code": "NO_KEY", "message": "Вставьте VERTEX_API_KEY в .env", "help": []})
 
     body = await request.json()
     source = UPLOADS / Path(body.get("filename", "")).name
@@ -367,42 +378,61 @@ async def translate(request: Request) -> dict[str, Any]:
             mime = MIME_TYPES.get(source.suffix.lower(), "video/mp4")
 
         prompt = professional_prompt(target_language)
-        async with httpx.AsyncClient(timeout=600) as client:
-            if media_path.stat().st_size <= 15 * 1024 * 1024:
-                media_part = {
-                    "inlineData": {
-                        "mimeType": mime,
-                        "data": base64.b64encode(media_path.read_bytes()).decode("ascii"),
-                    }
-                }
-            else:
-                uri = await upload_gemini_file(client, media_path, mime)
-                if not uri:
-                    raise HTTPException(500, "Gemini File API не вернул URI")
-                media_part = {"fileData": {"mimeType": mime, "fileUri": uri}}
-
-            payload = {
-                "contents": [{"parts": [media_part, {"text": prompt}]}],
-                "generationConfig": {
-                    "temperature": 0.1,
-                    "responseMimeType": "application/json",
+        max_inline_bytes = 14 * 1024 * 1024
+        media_size = media_path.stat().st_size
+        if media_size > max_inline_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail={
+                    "code": "AUDIO_TOO_LARGE",
+                    "message": (
+                        f"Аудиодорожка после сжатия занимает {media_size / 1024 / 1024:.1f} МБ. "
+                        "Для безопасной inline-отправки Vertex AI нужно не более 14 МБ."
+                    ),
+                    "help": [
+                        "Разделите очень длинное видео на части и обработайте их отдельно.",
+                        "Убедитесь, что ffmpeg установлен: без него сервер отправляет исходное видео.",
+                    ],
                 },
+            )
+
+        media_part = {
+            "inlineData": {
+                "mimeType": mime,
+                "data": base64.b64encode(media_path.read_bytes()).decode("ascii"),
             }
-            try:
+        }
+        payload = {
+            "contents": [{"role": "user", "parts": [media_part, {"text": prompt}]}],
+            "generationConfig": {
+                "temperature": 0.1,
+                "responseMimeType": "application/json",
+            },
+        }
+        try:
+            endpoint = vertex_model_url(TRANSCRIBE_MODEL)
+        except ValueError as exc:
+            raise HTTPException(
+                500,
+                {"code": "VERTEX_CONFIG_ERROR", "message": str(exc), "help": []},
+            ) from exc
+
+        try:
+            async with httpx.AsyncClient(timeout=600) as client:
                 response = await client.post(
-                    f"{API_ROOT}/v1beta/models/{TRANSCRIBE_MODEL}:generateContent",
-                    headers=gemini_headers(),
+                    endpoint,
+                    headers=vertex_headers(),
                     json=payload,
                 )
-            except httpx.RequestError as exc:
-                raise HTTPException(
-                    502,
-                    {
-                        "code": "GEMINI_UNREACHABLE",
-                        "message": f"Не удалось связаться с Google Gemini: {exc}",
-                        "help": ["Проверьте интернет, VPN/прокси и повторите через минуту."],
-                    },
-                ) from exc
+        except httpx.RequestError as exc:
+            raise HTTPException(
+                502,
+                {
+                    "code": "VERTEX_UNREACHABLE",
+                    "message": f"Не удалось связаться с Vertex AI: {exc}",
+                    "help": ["Проверьте интернет, VPN/прокси и повторите через минуту."],
+                },
+            ) from exc
 
     if response.status_code != 200:
         raise api_error(response, "transcription")
@@ -415,7 +445,7 @@ async def translate(request: Request) -> dict[str, Any]:
         if isinstance(result, list):
             result = {"speakers": [], "segments": result}
     except Exception as exc:
-        raise HTTPException(500, {"code": "BAD_GEMINI_JSON", "message": f"Не удалось разобрать сценарий: {exc}", "help": []})
+        raise HTTPException(500, {"code": "BAD_VERTEX_JSON", "message": f"Не удалось разобрать сценарий Vertex AI: {exc}", "help": []})
 
     raw_speakers = result.get("speakers") or []
     segments = result.get("segments") or []
@@ -494,24 +524,30 @@ async def synthesize(
         "Speak only the dialogue; do not read these instructions. Dialogue: " + text
     )
     payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": {
             "responseModalities": ["AUDIO"],
             "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}},
         },
     }
     try:
+        endpoint = vertex_model_url(TTS_MODEL)
         response = await client.post(
-            f"{API_ROOT}/v1beta/models/{TTS_MODEL}:generateContent",
-            headers=gemini_headers(),
+            endpoint,
+            headers=vertex_headers(),
             json=payload,
         )
+    except ValueError as exc:
+        return {
+            "ok": False,
+            "error": {"code": "VERTEX_CONFIG_ERROR", "message": str(exc), "help": []},
+        }
     except httpx.RequestError as exc:
         return {
             "ok": False,
             "error": {
-                "code": "GEMINI_UNREACHABLE",
-                "message": f"Не удалось связаться с Google Gemini: {exc}",
+                "code": "VERTEX_UNREACHABLE",
+                "message": f"Не удалось связаться с Vertex AI: {exc}",
                 "help": ["Проверьте интернет, VPN/прокси и повторите через минуту."],
             },
         }
@@ -537,8 +573,8 @@ async def synthesize(
 @app.post("/api/voice")
 async def voice(request: Request) -> dict[str, Any]:
     """Synthesize one or more segments, each with its speaker-specific voice."""
-    if not API_KEY or API_KEY == "ваш_ключ_сюда":
-        raise HTTPException(500, {"code": "NO_KEY", "message": "Вставьте Gemini API key в .env", "help": []})
+    if not API_KEY or API_KEY in {"ваш_ключ_сюда", "ваш_vertex_ключ"}:
+        raise HTTPException(500, {"code": "NO_KEY", "message": "Вставьте VERTEX_API_KEY в .env", "help": []})
 
     body = await request.json()
     output = []
@@ -672,7 +708,11 @@ app.mount("/exports", StaticFiles(directory=str(EXPORTS)), name="exports")
 if __name__ == "__main__":
     import uvicorn
 
-    print("\nJarCut → http://localhost:8000")
+    config = vertex_public_config()
+    print("\nJarCut v4 Vertex AI → http://localhost:8000")
+    print(f"Режим Vertex: {config['mode']}")
+    if config["mode"] == "standard":
+        print(f"Проект/регион: {config['project']} / {config['location']}")
     print(f"Распознавание: {TRANSCRIBE_MODEL}")
     print(f"Озвучка: {TTS_MODEL}\n")
     uvicorn.run(app, host="0.0.0.0", port=8000)
