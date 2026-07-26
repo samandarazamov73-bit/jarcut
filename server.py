@@ -1,478 +1,245 @@
 """
-JarCut v2 — Видеоредактор с авто-переводом и озвучкой.
+JarCut — Авто-дубляж видео.
 
-Workflow:
-1. Загрузил видео
-2. Нажал "Перевести" → Gemini 3.1 Pro слушает видео, распознаёт речь,
-   переводит на нужный язык, возвращает реплики с таймингами
-3. Редактируешь текст если надо
-4. Нажал "Озвучить" → Gemini 3.1 Flash TTS генерирует голос
-5. Регулируешь громкость оригинала
-6. Экспорт через ffmpeg
+Поставил видео → сам распознал речь → перевёл → озвучил как професс. дублёр → скачал.
 
 ЗАПУСК:  python server.py
 ОТКРОЙ:  http://localhost:8000
 """
 
-import os, json, uuid, subprocess, base64, tempfile
+import os, json, uuid, subprocess, base64
 from pathlib import Path
-from datetime import datetime
 
 import httpx
 from fastapi import FastAPI, UploadFile, File, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
-
-# ─── Конфиг ──────────────────────────────────────────────────────────────────
 
 load_dotenv()
 API_KEY = os.getenv("GEMINI_API_KEY", "")
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
-
-# Модели Gemini 3.1
-MODEL_PRO = "gemini-3.1-pro"           # для транскрипции + перевода
-MODEL_TTS = "gemini-3.1-flash-tts-preview"  # для озвучки
+MODEL_PRO = "gemini-3.1-pro"                  # распознавание + перевод
+MODEL_TTS = "gemini-3.1-flash-tts-preview"    # озвучка
 
 BASE = Path(__file__).parent
-UPLOADS = BASE / "uploads"
-PROJECTS = BASE / "projects"
-EXPORTS = BASE / "exports"
-for d in [UPLOADS, PROJECTS, EXPORTS]:
+UPLOADS, EXPORTS = BASE / "uploads", BASE / "exports"
+for d in (UPLOADS, EXPORTS):
     d.mkdir(exist_ok=True)
 
 app = FastAPI()
 
-# ─── Главная страница ─────────────────────────────────────────────────────────
+LANGS = {
+    "uz": "Uzbek (O'zbek tili)", "ru": "Russian", "en": "English", "tr": "Turkish",
+    "kk": "Kazakh", "ky": "Kyrgyz", "tg": "Tajik", "ar": "Arabic",
+    "de": "German", "fr": "French", "es": "Spanish", "ko": "Korean", "ja": "Japanese",
+}
+
 
 @app.get("/")
 async def root():
     return FileResponse(str(BASE / "index.html"))
 
-# ─── Загрузка файлов ─────────────────────────────────────────────────────────
+
+# ─── 1. Загрузка видео ───────────────────────────────────────────────────────
 
 @app.post("/api/upload")
-async def upload_file(file: UploadFile = File(...)):
-    ext = Path(file.filename).suffix.lower()
-    name = f"{uuid.uuid4().hex[:10]}{ext}"
-    content = await file.read()
-    (UPLOADS / name).write_bytes(content)
-    return {"ok": True, "filename": name, "url": f"/uploads/{name}", "size": len(content)}
-
-# ─── Загрузка файла в Gemini File API (для больших видео) ─────────────────────
-
-async def upload_to_gemini(filepath: Path, mime_type: str) -> str:
-    """Загружает файл в Gemini Files API, возвращает file URI."""
-    url = f"https://generativelanguage.googleapis.com/upload/v1beta/files?key={API_KEY}"
-    
-    async with httpx.AsyncClient(timeout=300) as client:
-        # Сначала создаём upload
-        file_size = filepath.stat().st_size
-        
-        # Для файлов < 20MB отправляем inline
-        if file_size < 20 * 1024 * 1024:
-            return None  # будем отправлять inline
-        
-        # Для больших файлов используем File API
-        headers = {
-            "X-Goog-Upload-Protocol": "resumable",
-            "X-Goog-Upload-Command": "start",
-            "X-Goog-Upload-Header-Content-Length": str(file_size),
-            "X-Goog-Upload-Header-Content-Type": mime_type,
-            "Content-Type": "application/json"
-        }
-        
-        meta = {"file": {"displayName": filepath.name}}
-        resp = await client.post(url, headers=headers, json=meta)
-        
-        if resp.status_code != 200:
-            return None
-            
-        upload_url = resp.headers.get("X-Goog-Upload-URL")
-        if not upload_url:
-            return None
-        
-        # Загружаем данные
-        data = filepath.read_bytes()
-        headers2 = {
-            "Content-Length": str(file_size),
-            "X-Goog-Upload-Offset": "0",
-            "X-Goog-Upload-Command": "upload, finalize"
-        }
-        resp2 = await client.post(upload_url, headers=headers2, content=data)
-        
-        if resp2.status_code == 200:
-            result = resp2.json()
-            return result.get("file", {}).get("uri")
-    
-    return None
+async def upload(file: UploadFile = File(...)):
+    name = f"{uuid.uuid4().hex[:10]}{Path(file.filename).suffix.lower()}"
+    (UPLOADS / name).write_bytes(await file.read())
+    return {"ok": True, "filename": name, "url": f"/uploads/{name}"}
 
 
-# ─── ТРАНСКРИПЦИЯ + ПЕРЕВОД (Gemini 3.1 Pro) ─────────────────────────────────
+# ─── 2. Распознать речь + перевести (Gemini 3.1 Pro) ─────────────────────────
 
-@app.post("/api/transcribe")
-async def transcribe(request: Request):
-    """
-    Принимает: { "filename": "video.mp4", "targetLang": "uz" }
-    Gemini 3.1 Pro смотрит видео, распознаёт речь, переводит.
-    Возвращает: { "segments": [{ "start": 0.5, "end": 2.1, "original": "...", "translated": "..." }] }
-    """
+@app.post("/api/translate")
+async def translate(request: Request):
+    """Слушает видео, распознаёт речь, переводит. Возвращает реплики с таймингами."""
     if not API_KEY:
         raise HTTPException(500, "GEMINI_API_KEY не задан в .env")
 
     body = await request.json()
-    filename = body.get("filename", "")
-    target_lang = body.get("targetLang", "uz")
-    
-    filepath = UPLOADS / filename
-    if not filepath.exists():
-        raise HTTPException(404, f"Файл {filename} не найден")
+    path = UPLOADS / body.get("filename", "")
+    lang = LANGS.get(body.get("lang", "uz"), "Uzbek")
 
-    # Определяем MIME тип
-    ext = filepath.suffix.lower()
-    mime_map = {".mp4": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime",
-                ".avi": "video/x-msvideo", ".mkv": "video/x-matroska", ".mp3": "audio/mp3",
-                ".wav": "audio/wav", ".ogg": "audio/ogg", ".m4a": "audio/mp4"}
-    mime_type = mime_map.get(ext, "video/mp4")
+    if not path.exists():
+        raise HTTPException(404, "Файл не найден")
 
-    # Определяем язык для промпта
-    lang_names = {
-        "uz": "Uzbek (O'zbek tili)", "ru": "Russian (Русский)", "en": "English",
-        "tr": "Turkish (Türkçe)", "ko": "Korean (한국어)", "ja": "Japanese (日本語)",
-        "de": "German (Deutsch)", "fr": "French (Français)", "es": "Spanish (Español)",
-        "ar": "Arabic (العربية)", "zh": "Chinese (中文)", "hi": "Hindi (हिन्दी)",
-        "kk": "Kazakh (Қазақ)", "ky": "Kyrgyz (Кыргыз)", "tg": "Tajik (Тоҷикӣ)"
-    }
-    target_name = lang_names.get(target_lang, target_lang)
+    mime = {".mp4": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime",
+            ".mkv": "video/x-matroska", ".avi": "video/x-msvideo",
+            ".mp3": "audio/mp3", ".wav": "audio/wav", ".m4a": "audio/mp4"}.get(path.suffix.lower(), "video/mp4")
 
-    # Промпт для Gemini
-    prompt = f"""Listen carefully to this video/audio. Transcribe ALL spoken speech and translate it to {target_name}.
+    prompt = f"""You are a professional dubbing translator. Listen to this video and transcribe ALL spoken speech, then translate it into {lang}.
 
-Return the result as a JSON array. Each element represents one phrase/sentence with timing:
-
-[
-  {{"start": 0.5, "end": 2.3, "original": "original text in source language", "translated": "translated text in {target_name}"}},
-  {{"start": 3.1, "end": 5.8, "original": "...", "translated": "..."}},
-  ...
-]
+Return a JSON array. One item per spoken phrase:
+[{{"start": 0.5, "end": 2.3, "original": "...", "translated": "..."}}]
 
 Rules:
-- "start" and "end" are in seconds (float)
-- Capture EVERY spoken phrase, don't skip anything
-- Keep timing accurate to the speech
-- Translate naturally, not word-by-word
-- Return ONLY valid JSON array, no markdown, no explanation
-- If no speech is detected, return empty array []"""
+- start/end in seconds (float), accurate to the speech
+- Translate NATURALLY for dubbing — like a professional voice actor would say it, not word-by-word
+- Keep the translated phrase roughly the same spoken length as the original so it fits the timing
+- Preserve tone and emotion of the speaker
+- Capture EVERY phrase, skip nothing
+- Return ONLY the JSON array, no markdown
+- If no speech: []"""
 
-    # Собираем запрос
-    file_size = filepath.stat().st_size
-    
-    if file_size < 20 * 1024 * 1024:
-        # Inline (base64) для файлов < 20MB
-        file_data = base64.b64encode(filepath.read_bytes()).decode()
-        contents = [{
-            "parts": [
-                {"inlineData": {"mimeType": mime_type, "data": file_data}},
-                {"text": prompt}
-            ]
-        }]
-    else:
-        # Используем File API для больших файлов
-        file_uri = await upload_to_gemini(filepath, mime_type)
-        if not file_uri:
-            raise HTTPException(500, "Не удалось загрузить файл в Gemini (слишком большой)")
-        contents = [{
-            "parts": [
-                {"fileData": {"mimeType": mime_type, "fileUri": file_uri}},
-                {"text": prompt}
-            ]
-        }]
-
+    data_b64 = base64.b64encode(path.read_bytes()).decode()
     payload = {
-        "contents": contents,
-        "generationConfig": {
-            "temperature": 0.2,
-            "responseMimeType": "application/json"
-        }
+        "contents": [{"parts": [
+            {"inlineData": {"mimeType": mime, "data": data_b64}},
+            {"text": prompt},
+        ]}],
+        "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"},
     }
 
-    url = f"{BASE_URL}/{MODEL_PRO}:generateContent?key={API_KEY}"
+    async with httpx.AsyncClient(timeout=300) as client:
+        r = await client.post(f"{BASE_URL}/{MODEL_PRO}:generateContent?key={API_KEY}", json=payload)
 
-    async with httpx.AsyncClient(timeout=180) as client:
-        resp = await client.post(url, json=payload, headers={"Content-Type": "application/json"})
+    if r.status_code != 200:
+        raise HTTPException(r.status_code, f"Gemini: {r.text[:300]}")
 
-    if resp.status_code != 200:
-        error_text = resp.text[:300]
-        raise HTTPException(resp.status_code, f"Gemini ошибка: {error_text}")
-
-    data = resp.json()
-    
-    # Парсим ответ
     try:
-        candidates = data.get("candidates", [])
-        text = candidates[0]["content"]["parts"][0]["text"]
-        # Убираем возможные markdown обёртки
-        text = text.strip()
+        text = r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
         if text.startswith("```"):
-            text = text.split("\n", 1)[1] if "\n" in text else text[3:]
-            if text.endswith("```"):
-                text = text[:-3]
-            text = text.strip()
+            text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
         segments = json.loads(text)
-    except (IndexError, KeyError, json.JSONDecodeError) as e:
-        raise HTTPException(500, f"Не удалось распарсить ответ Gemini: {str(e)[:200]}")
+    except Exception as e:
+        raise HTTPException(500, f"Не удалось разобрать ответ: {e}")
 
     return {"ok": True, "segments": segments}
 
 
-# ─── TTS (Gemini 3.1 Flash TTS) ──────────────────────────────────────────────
+# ─── 3. Озвучка одной реплики (Gemini 3.1 Flash TTS) ─────────────────────────
 
-@app.post("/api/tts")
-async def tts(request: Request):
-    """
-    Генерация голоса через Gemini 3.1 Flash TTS.
-    
-    Принимает: { "text": "...", "voice": "Kore", "lang": "uz" }
-    Возвращает: { "ok": true, "url": "/uploads/tts_xxx.wav" }
-    """
-    if not API_KEY:
-        raise HTTPException(500, "GEMINI_API_KEY не задан в .env")
-
-    body = await request.json()
-    text = body.get("text", "").strip()
-    voice = body.get("voice", "Kore")
-    
-    if not text:
-        raise HTTPException(400, "Нужен текст")
+async def _tts_one(client: httpx.AsyncClient, text: str, voice: str) -> dict:
+    """Генерирует голос для одной реплики в стиле профессионального дублёра."""
+    # Инструкция стиля — Gemini TTS понимает natural language промпты
+    styled = f"Say this naturally, like a professional voice actor dubbing a movie: {text}"
 
     payload = {
-        "contents": [{"parts": [{"text": text}]}],
+        "contents": [{"parts": [{"text": styled}]}],
         "generationConfig": {
             "responseModalities": ["AUDIO"],
-            "speechConfig": {
-                "voiceConfig": {
-                    "prebuiltVoiceConfig": {"voiceName": voice}
-                }
-            }
-        }
+            "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}},
+        },
     }
 
-    url = f"{BASE_URL}/{MODEL_TTS}:generateContent?key={API_KEY}"
+    r = await client.post(f"{BASE_URL}/{MODEL_TTS}:generateContent?key={API_KEY}", json=payload)
+    if r.status_code != 200:
+        return {"ok": False, "error": f"HTTP {r.status_code}"}
 
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(url, json=payload, headers={"Content-Type": "application/json"})
+    parts = r.json()["candidates"][0]["content"]["parts"]
+    inline = next((p["inlineData"] for p in parts if "inlineData" in p), None)
+    if not inline:
+        return {"ok": False, "error": "нет аудио"}
 
-    if resp.status_code != 200:
-        error_text = resp.text[:300]
-        return {"ok": False, "error": f"HTTP {resp.status_code}: {error_text}"}
+    raw = base64.b64decode(inline["data"])
+    mime = inline.get("mimeType", "audio/wav")
+    ext = ".wav" if "wav" in mime or "pcm" in mime else ".mp3"
+    fname = f"v_{uuid.uuid4().hex[:8]}{ext}"
 
-    data = resp.json()
-    
-    try:
-        parts = data["candidates"][0]["content"]["parts"]
-        audio_part = next((p["inlineData"] for p in parts if "inlineData" in p), None)
-        if not audio_part:
-            return {"ok": False, "error": "Нет аудио в ответе"}
-        
-        raw = base64.b64decode(audio_part["data"])
-        mime = audio_part.get("mimeType", "audio/wav")
-        ext = ".wav" if "wav" in mime else ".mp3" if "mp3" in mime else ".ogg"
-        fname = f"tts_{uuid.uuid4().hex[:8]}{ext}"
-        (UPLOADS / fname).write_bytes(raw)
-        
-        return {"ok": True, "url": f"/uploads/{fname}", "filename": fname, "mime": mime, "size": len(raw)}
-    except Exception as e:
-        return {"ok": False, "error": str(e)[:200]}
+    # Gemini отдаёт raw PCM — оборачиваем в WAV-контейнер, чтобы играло в браузере
+    if "pcm" in mime or "L16" in mime:
+        raw = _pcm_to_wav(raw)
+
+    (UPLOADS / fname).write_bytes(raw)
+    return {"ok": True, "url": f"/uploads/{fname}", "filename": fname}
 
 
-# ─── TTS BATCH (озвучить все сегменты разом) ──────────────────────────────────
+def _pcm_to_wav(pcm: bytes, rate: int = 24000, channels: int = 1, bits: int = 16) -> bytes:
+    """Добавляет WAV-заголовок к raw PCM (Gemini TTS отдаёт 24kHz mono 16-bit)."""
+    import struct
+    block = channels * bits // 8
+    header = b"RIFF" + struct.pack("<I", 36 + len(pcm)) + b"WAVEfmt " + \
+        struct.pack("<IHHIIHH", 16, 1, channels, rate, rate * block, block, bits) + \
+        b"data" + struct.pack("<I", len(pcm))
+    return header + pcm
 
-@app.post("/api/tts-batch")
-async def tts_batch(request: Request):
-    """
-    Озвучивает массив сегментов.
-    Принимает: { "segments": [{"text": "...", "id": "seg_0"}], "voice": "Kore" }
-    """
+
+@app.post("/api/voice")
+async def voice(request: Request):
+    """Озвучивает список реплик. Принимает: {segments:[{id,text}], voice:"Kore"}"""
     if not API_KEY:
         raise HTTPException(500, "GEMINI_API_KEY не задан в .env")
 
     body = await request.json()
     segments = body.get("segments", [])
-    voice = body.get("voice", "Kore")
-    
-    results = []
-    
-    async with httpx.AsyncClient(timeout=60) as client:
-        for seg in segments:
-            text = seg.get("text", "").strip()
-            seg_id = seg.get("id", "")
-            
+    v = body.get("voice", "Kore")
+    out = []
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        for s in segments:
+            text = (s.get("text") or "").strip()
             if not text:
-                results.append({"id": seg_id, "ok": False, "error": "Пустой текст"})
+                out.append({"id": s.get("id"), "ok": False, "error": "пусто"})
                 continue
-
-            payload = {
-                "contents": [{"parts": [{"text": text}]}],
-                "generationConfig": {
-                    "responseModalities": ["AUDIO"],
-                    "speechConfig": {
-                        "voiceConfig": {
-                            "prebuiltVoiceConfig": {"voiceName": voice}
-                        }
-                    }
-                }
-            }
-
-            url = f"{BASE_URL}/{MODEL_TTS}:generateContent?key={API_KEY}"
-            
             try:
-                resp = await client.post(url, json=payload, headers={"Content-Type": "application/json"})
-                
-                if resp.status_code != 200:
-                    results.append({"id": seg_id, "ok": False, "error": f"HTTP {resp.status_code}"})
-                    continue
-
-                data = resp.json()
-                parts = data["candidates"][0]["content"]["parts"]
-                audio_part = next((p["inlineData"] for p in parts if "inlineData" in p), None)
-                
-                if not audio_part:
-                    results.append({"id": seg_id, "ok": False, "error": "Нет аудио"})
-                    continue
-                
-                raw = base64.b64decode(audio_part["data"])
-                mime = audio_part.get("mimeType", "audio/wav")
-                ext = ".wav" if "wav" in mime else ".mp3" if "mp3" in mime else ".ogg"
-                fname = f"tts_{uuid.uuid4().hex[:8]}{ext}"
-                (UPLOADS / fname).write_bytes(raw)
-                
-                results.append({"id": seg_id, "ok": True, "url": f"/uploads/{fname}", "filename": fname})
+                res = await _tts_one(client, text, v)
             except Exception as e:
-                results.append({"id": seg_id, "ok": False, "error": str(e)[:100]})
-    
-    return {"ok": True, "results": results}
+                res = {"ok": False, "error": str(e)[:100]}
+            res["id"] = s.get("id")
+            out.append(res)
+
+    return {"ok": True, "results": out}
 
 
-# ─── Проекты ─────────────────────────────────────────────────────────────────
-
-@app.post("/api/save")
-async def save(request: Request):
-    body = await request.json()
-    name = "".join(c for c in body.get("name", "project") if c.isalnum() or c in "-_ ") or "project"
-    (PROJECTS / f"{name}.json").write_text(
-        json.dumps({"name": name, "saved": datetime.now().isoformat(), "data": body.get("data", {})},
-                   ensure_ascii=False, indent=2), encoding="utf-8")
-    return {"ok": True}
-
-@app.get("/api/projects")
-async def projects():
-    files = sorted(PROJECTS.glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True)
-    return {"ok": True, "list": [{"name": f.stem} for f in files]}
-
-@app.get("/api/load/{name}")
-async def load(name: str):
-    f = PROJECTS / f"{name}.json"
-    if not f.exists():
-        raise HTTPException(404, "Не найден")
-    return {"ok": True, "project": json.loads(f.read_text("utf-8"))}
-
-
-# ─── Экспорт (ffmpeg с регулировкой громкости) ───────────────────────────────
+# ─── 4. Экспорт: видео + дубляж (ffmpeg) ─────────────────────────────────────
 
 @app.post("/api/export")
 async def export(request: Request):
-    """
-    Экспорт видео с наложенной озвучкой.
-    
-    Принимает: {
-        "video": "filename.mp4",
-        "segments": [{"audio": "tts_xxx.wav", "start": 1.5}],
-        "originalVolume": 0.3,   // 0.0-1.0 громкость оригинала
-        "outputName": "result"
-    }
-    """
+    """Накладывает дубляж на видео, приглушая оригинальный звук."""
     body = await request.json()
-    video_file = body.get("video", "")
-    segments = body.get("segments", [])
-    orig_volume = body.get("originalVolume", 0.3)
-    output_name = body.get("outputName", f"export_{uuid.uuid4().hex[:6]}")
+    video = UPLOADS / body.get("video", "")
+    segs = body.get("segments", [])
+    orig_vol = float(body.get("originalVolume", 0.15))
 
-    video_path = UPLOADS / video_file
-    if not video_path.exists():
+    if not video.exists():
         raise HTTPException(404, "Видео не найдено")
-    if not segments:
-        raise HTTPException(400, "Нет сегментов для экспорта")
+    if not segs:
+        raise HTTPException(400, "Нет озвученных реплик")
 
-    output_path = EXPORTS / f"{output_name}.mp4"
+    out = EXPORTS / f"dub_{uuid.uuid4().hex[:6]}.mp4"
+    inputs, filters, n = ["-i", str(video)], [], 0
 
-    # Строим ffmpeg команду
-    inputs = ["-i", str(video_path)]
-    filter_parts = []
-    valid_count = 0
-
-    for i, seg in enumerate(segments):
-        audio_file = seg.get("audio", "")
-        start = seg.get("start", 0)
-        audio_path = UPLOADS / audio_file
-        if not audio_path.exists():
+    for s in segs:
+        af = UPLOADS / s.get("audio", "")
+        if not af.exists():
             continue
-        inputs += ["-i", str(audio_path)]
-        delay_ms = int(start * 1000)
-        valid_count += 1
-        filter_parts.append(f"[{valid_count}:a]adelay={delay_ms}|{delay_ms}[a{valid_count}]")
+        n += 1
+        inputs += ["-i", str(af)]
+        ms = int(float(s.get("start", 0)) * 1000)
+        filters.append(f"[{n}:a]adelay={ms}|{ms}[a{n}]")
 
-    if not filter_parts:
-        raise HTTPException(400, "Нет валидных аудио файлов")
+    if not n:
+        raise HTTPException(400, "Аудиофайлы не найдены")
 
-    # Фильтр: приглушаем оригинальный звук + миксуем TTS
-    orig_vol_filter = f"[0:a]volume={orig_volume}[orig]"
-    tts_labels = "".join(f"[a{i+1}]" for i in range(len(filter_parts)))
-    mix_inputs = f"[orig]{tts_labels}"
-    mix_filter = f"{mix_inputs}amix=inputs={len(filter_parts)+1}:duration=first:dropout_transition=2[final]"
-    
-    full_filter = orig_vol_filter + ";" + ";".join(filter_parts) + ";" + mix_filter
+    labels = "".join(f"[a{i}]" for i in range(1, n + 1))
+    fc = (f"[0:a]volume={orig_vol}[orig];" + ";".join(filters) +
+          f";[orig]{labels}amix=inputs={n + 1}:duration=first:normalize=0[out]")
 
-    cmd = [
-        "ffmpeg", "-y",
-        *inputs,
-        "-filter_complex", full_filter,
-        "-map", "0:v",
-        "-map", "[final]",
-        "-c:v", "copy",
-        "-c:a", "aac",
-        "-b:a", "192k",
-        str(output_path)
-    ]
+    cmd = ["ffmpeg", "-y", *inputs, "-filter_complex", fc,
+           "-map", "0:v", "-map", "[out]", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", str(out)]
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-        if result.returncode != 0:
-            return {"ok": False, "error": result.stderr[-500:]}
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+        if r.returncode != 0:
+            return {"ok": False, "error": r.stderr[-400:]}
     except FileNotFoundError:
-        return {"ok": False, "error": "ffmpeg не установлен! Установите: https://ffmpeg.org"}
+        return {"ok": False, "error": "ffmpeg не установлен. Скачайте: ffmpeg.org"}
     except subprocess.TimeoutExpired:
-        return {"ok": False, "error": "Таймаут ffmpeg (>10 мин)"}
+        return {"ok": False, "error": "ffmpeg таймаут"}
 
-    return {"ok": True, "url": f"/exports/{output_name}.mp4", "filename": f"{output_name}.mp4"}
+    return {"ok": True, "url": f"/exports/{out.name}"}
 
-
-# ─── Статика ─────────────────────────────────────────────────────────────────
 
 app.mount("/uploads", StaticFiles(directory=str(UPLOADS)), name="uploads")
 app.mount("/exports", StaticFiles(directory=str(EXPORTS)), name="exports")
 
-# ─── Запуск ──────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import uvicorn
-    print()
-    print("  ╔═══════════════════════════════════════════╗")
-    print("  ║    JarCut v2 — Видеоредактор             ║")
-    print("  ║    http://localhost:8000                  ║")
-    print("  ╚═══════════════════════════════════════════╝")
-    print()
+    print("\n  JarCut → http://localhost:8000\n")
     if not API_KEY:
-        print("  ⚠️  ВНИМАНИЕ: GEMINI_API_KEY не задан в .env!")
-        print("     Получить ключ: https://aistudio.google.com/apikey")
-        print()
+        print("  [!] Вставьте GEMINI_API_KEY в файл .env")
+        print("      Ключ: https://aistudio.google.com/apikey\n")
     uvicorn.run(app, host="0.0.0.0", port=8000)
