@@ -298,10 +298,30 @@ def extract_audio(source: Path, target: Path) -> bool:
         return False
 
 
-def professional_prompt(target_language: str) -> str:
+def letter_count(text: Any) -> int:
+    """Count Unicode letters while ignoring spaces, punctuation, digits, and apostrophes."""
+    apostrophes = {"'", "’", "‘", "ʻ", "ʼ", "`"}
+    return sum(
+        character.isalpha() and character not in apostrophes
+        for character in str(text or "")
+    )
+
+
+def professional_prompt(target_language: str, max_extra_letters: int | None = None) -> str:
+    length_rule = ""
+    if max_extra_letters is not None:
+        length_rule = f"""
+STRICT DUBBING-LENGTH RULE:
+- For every segment, count Unicode alphabetic letters only; ignore spaces, punctuation, apostrophes, and digits.
+- The translated text MUST contain no more than original letter count + {max_extra_letters} letters.
+- Prefer a natural shorter Uzbek expression instead of speaking faster.
+- Preserve the complete meaning, but remove filler and choose concise synonyms.
+- Verify the letter count yourself before returning JSON. This rule is mandatory for every segment.
+"""
+
     return f"""You are a senior dubbing director, dialogue editor, translator, and speaker-diarization expert.
 Listen to the supplied audio and create a professional dubbing script translated into {target_language}.
-
+{length_rule}
 Identify every DISTINCT audible speaker by voice, not by visual appearance. Keep one stable speaker_id for the same person throughout the whole recording. Treat narrators and off-screen speakers as separate speakers. If people talk over each other, return separate overlapping segments. Do not merge different speakers.
 
 Return exactly one JSON object with this structure:
@@ -336,6 +356,126 @@ Requirements:
 - Return JSON only. If there is no speech, return {{"speakers":[],"segments":[]}}."""
 
 
+async def shorten_overlong_translations(
+    segments: list[dict[str, Any]],
+    target_language: str,
+    max_extra_letters: int,
+) -> int:
+    """Ask Vertex to shorten translations until every measurable line fits its budget."""
+    adjusted_indices: set[int] = set()
+    endpoint = vertex_model_url(TRANSCRIBE_MODEL)
+
+    async with httpx.AsyncClient(timeout=180) as client:
+        for _ in range(3):
+            jobs = []
+            for index, segment in enumerate(segments):
+                original = str(segment.get("original") or "").strip()
+                translated = str(segment.get("translated") or "").strip()
+                original_letters = letter_count(original)
+                max_letters = original_letters + max_extra_letters
+                if translated and letter_count(translated) > max_letters:
+                    jobs.append({
+                        "index": index,
+                        "original": original,
+                        "current_translation": translated,
+                        "max_letters": max_letters,
+                    })
+
+            if not jobs:
+                return len(adjusted_indices)
+
+            correction_prompt = f"""You are a professional {target_language} dubbing editor.
+Rewrite every current_translation below into natural spoken {target_language} while preserving its complete meaning and emotion.
+Each result MUST have no more than max_letters Unicode alphabetic letters. Spaces, punctuation, apostrophes, and digits do not count.
+Use concise synonyms and remove filler. Never split a line, omit an item, or change its index.
+Count letters before answering.
+
+Return JSON only in this exact format:
+{{"segments":[{{"index":0,"translated":"short natural translation"}}]}}
+
+INPUT:
+{json.dumps(jobs, ensure_ascii=False)}"""
+            payload = {
+                "contents": [{"role": "user", "parts": [{"text": correction_prompt}]}],
+                "generationConfig": {
+                    "temperature": 0.1,
+                    "responseMimeType": "application/json",
+                },
+            }
+            try:
+                response = await client.post(endpoint, headers=vertex_headers(), json=payload)
+            except httpx.RequestError as exc:
+                raise HTTPException(
+                    502,
+                    {
+                        "code": "VERTEX_LENGTH_CHECK_UNREACHABLE",
+                        "message": f"Не удалось сократить длинные реплики через Vertex AI: {exc}",
+                        "help": ["Повторите дубляж через минуту."],
+                    },
+                ) from exc
+
+            if response.status_code != 200:
+                raise api_error(response, "translation_length_correction")
+
+            try:
+                text = response.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+                if text.startswith("```"):
+                    text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+                parsed = json.loads(text)
+                if not isinstance(parsed, dict):
+                    raise ValueError("корень ответа должен быть JSON-объектом")
+                updates = parsed.get("segments")
+                if not isinstance(updates, list) or any(not isinstance(item, dict) for item in updates):
+                    raise ValueError("segments должен быть массивом JSON-объектов")
+            except Exception as exc:
+                raise HTTPException(
+                    502,
+                    {
+                        "code": "BAD_LENGTH_CORRECTION_JSON",
+                        "message": f"Vertex AI вернул неверный ответ при сокращении реплик: {exc}",
+                        "help": ["Повторите дубляж."],
+                    },
+                ) from exc
+
+            requested = {job["index"] for job in jobs}
+            for update in updates:
+                try:
+                    index = int(update.get("index"))
+                except (TypeError, ValueError):
+                    continue
+                candidate = str(update.get("translated") or "").strip()
+                if index in requested and candidate:
+                    current = str(segments[index].get("translated") or "")
+                    if letter_count(candidate) < letter_count(current):
+                        segments[index]["translated"] = candidate
+                        adjusted_indices.add(index)
+
+    remaining = []
+    for index, segment in enumerate(segments):
+        original_letters = letter_count(segment.get("original"))
+        translated_letters = letter_count(segment.get("translated"))
+        if translated_letters > original_letters + max_extra_letters:
+            remaining.append(index + 1)
+
+    if remaining:
+        raise HTTPException(
+            422,
+            {
+                "code": "TRANSLATION_TOO_LONG",
+                "message": (
+                    "Vertex AI не смог достаточно сократить реплики: "
+                    + ", ".join(map(str, remaining[:10]))
+                ),
+                "help": [
+                    "Нажмите «Дублировать заново»: сервер ещё раз подберёт более короткие формулировки.",
+                    f"Лимит для узбекского перевода: оригинал + {max_extra_letters} букв.",
+                ],
+            },
+        )
+
+    return len(adjusted_indices)
+
+
 def assign_speaker_voices(speakers: list[dict[str, Any]]) -> list[dict[str, Any]]:
     used: set[str] = set()
     all_voices = sorted(VOICES)
@@ -365,7 +505,10 @@ async def translate(request: Request) -> dict[str, Any]:
 
     body = await request.json()
     source = UPLOADS / Path(body.get("filename", "")).name
-    target_language = LANGS.get(body.get("lang", "uz"), LANGS["uz"])
+    requested_language_code = str(body.get("lang", "uz"))
+    language_code = requested_language_code if requested_language_code in LANGS else "uz"
+    target_language = LANGS[language_code]
+    max_extra_letters = 8 if language_code == "uz" else None
     if not source.exists():
         raise HTTPException(404, "Файл не найден")
 
@@ -377,7 +520,7 @@ async def translate(request: Request) -> dict[str, Any]:
             media_path = source
             mime = MIME_TYPES.get(source.suffix.lower(), "video/mp4")
 
-        prompt = professional_prompt(target_language)
+        prompt = professional_prompt(target_language, max_extra_letters)
         max_inline_bytes = 14 * 1024 * 1024
         media_size = media_path.stat().st_size
         if media_size > max_inline_bytes:
@@ -449,6 +592,13 @@ async def translate(request: Request) -> dict[str, Any]:
 
     raw_speakers = result.get("speakers") or []
     segments = result.get("segments") or []
+    length_adjusted = 0
+    if max_extra_letters is not None:
+        length_adjusted = await shorten_overlong_translations(
+            segments,
+            target_language,
+            max_extra_letters,
+        )
 
     # Never pass model-generated IDs into inline browser handlers. Normalize all IDs.
     speakers: list[dict[str, Any]] = []
@@ -477,6 +627,11 @@ async def translate(request: Request) -> dict[str, Any]:
         segment["speaker_id"] = id_map[old_id]
         segment["start"] = max(0.0, float(segment.get("start", 0)))
         segment["end"] = max(segment["start"] + 0.2, float(segment.get("end", segment["start"] + 2)))
+        if max_extra_letters is not None:
+            original_letters = letter_count(segment.get("original"))
+            segment["original_letters"] = original_letters
+            segment["translated_letters"] = letter_count(segment.get("translated"))
+            segment["max_translated_letters"] = original_letters + max_extra_letters
 
     speakers = assign_speaker_voices(speakers)
     return {
@@ -484,6 +639,8 @@ async def translate(request: Request) -> dict[str, Any]:
         "model": TRANSCRIBE_MODEL,
         "speakers": speakers,
         "segments": segments,
+        "lengthAdjusted": length_adjusted,
+        "maxExtraLetters": max_extra_letters,
     }
 
 

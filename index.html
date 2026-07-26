@@ -52,6 +52,7 @@ button,select,textarea,input{font:inherit}.btn{border:0;border-radius:9px;paddin
     <div class="bar" id="progress" hidden><i id="progress-fill"></i></div>
     <div class="status" id="status" hidden></div>
     <div class="model-note" id="model-note">Проверяю Vertex AI и модели Gemini 3.1…</div>
+    <div class="model-note">Для узбекского: перевод автоматически сокращается до длины оригинала + максимум 8 букв.</div>
   </section>
 
   <section class="card" id="speakers-card" hidden>
@@ -122,8 +123,8 @@ async function dub(){if(!S.file)return;const runId=++S.runId;resetDubbingAudio()
   try{const r=await fetch('/api/translate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filename:S.file,lang:$('language').value})});const d=await r.json();if(!r.ok)throw errorInfo(d);if(runId!==S.runId)return;
     S.speakers=d.speakers||[];S.segments=(d.segments||[]).map((x,i)=>({id:'seg'+i,start:+x.start||0,end:+x.end||(+x.start||0)+2,speaker_id:x.speaker_id||'S1',original:x.original||'',text:x.translated||'',emotion:x.emotion||'neutral',audio:null,url:null,state:'wait',revision:0}));
     if(!S.segments.length)throw{message:'В видео не найдена речь',help:[]};
-    $('progress-fill').style.width='35%';renderSpeakers();renderPhrases();$('speakers-card').hidden=false;$('phrases-card').hidden=false;toast('ok',`Найдено спикеров: ${S.speakers.length}, реплик: ${S.segments.length}`);await voiceSegments(S.segments,35);$('export-card').hidden=false;
-  }catch(err){const info=err.message?err:errorInfo(err);showStatus('err','Дубляж не запущен: '+info.message,false,info.help||[]);toast('err','Проверьте Vertex AI');}
+    $('progress-fill').style.width='35%';renderSpeakers();renderPhrases();$('speakers-card').hidden=false;$('phrases-card').hidden=false;const shortened=d.lengthAdjusted?`, сокращено длинных реплик: ${d.lengthAdjusted}`:'';toast('ok',`Найдено спикеров: ${S.speakers.length}, реплик: ${S.segments.length}${shortened}`);await voiceSegments(S.segments,35);$('export-card').hidden=false;
+  }catch(err){const info=err.message?err:errorInfo(err);showStatus('err','Дубляж не запущен: '+info.message,false,info.help||[]);toast('err',info.message||'Дубляж не запущен');}
   finally{$('dub').disabled=!S.apiReady;$('dub').textContent='Дублировать заново';setTimeout(()=>$('progress').hidden=true,1200)}}
 
 function renderSpeakers(){$('speaker-count').textContent=`${S.speakers.length} голос(ов)`;$('speakers').innerHTML=S.speakers.map((s,i)=>`<div class="speaker"><div class="speaker-top"><span class="speaker-color" style="background:${COLORS[i%COLORS.length]}"></span><span class="speaker-name">${esc(s.label||s.id)}</span><span class="speaker-desc" title="${esc(s.delivery)}">${esc(s.voice_character||'neutral')}</span></div><select onchange="changeVoice('${esc(s.id)}',this.value)">${VOICES.map(v=>`<option value="${v}" ${v===s.voice?'selected':''}>${v}</option>`).join('')}</select></div>`).join('')}
