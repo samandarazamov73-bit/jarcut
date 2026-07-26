@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>JarCut — Видеоредактор</title>
+<style>
+/* ═══ Всё CSS прямо тут ═══ */
+:root {
+    --bg: #1a1a2e; --bg2: #16213e; --bg3: #0f3460; --panel: #1e2a4a;
+    --accent: #e94560; --accent2: #ff6b81; --green: #2ecc71; --blue: #3498db; --yellow: #f39c12;
+    --text: #ecf0f1; --text2: #95a5a6; --muted: #636e72; --border: #2c3e50;
+    --radius: 6px;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family: -apple-system, sans-serif; background: var(--bg); color: var(--text); height:100vh; display:flex; flex-direction:column; overflow:hidden; }
+
+/* Toolbar */
+.toolbar { display:flex; align-items:center; justify-content:space-between; padding:8px 16px; background:var(--bg2); border-bottom:1px solid var(--border); height:44px; }
+.logo { font-size:15px; font-weight:700; color:var(--accent); }
+.toolbar-actions { display:flex; gap:6px; align-items:center; }
+.toolbar-actions input { background:var(--bg); border:1px solid var(--border); color:var(--text); padding:4px 8px; border-radius:var(--radius); font-size:12px; width:130px; }
+
+/* Buttons */
+button { background:var(--bg3); color:var(--text); border:1px solid var(--border); padding:5px 10px; border-radius:var(--radius); font-size:11px; cursor:pointer; transition:.2s; white-space:nowrap; }
+button:hover:not(:disabled) { background:var(--accent); border-color:var(--accent); }
+button:disabled { opacity:.4; cursor:not-allowed; }
+.btn-primary { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600; padding:7px 14px; font-size:12px; }
+.btn-primary:hover:not(:disabled) { background:var(--accent2); }
+.btn-danger { color:var(--accent); border-color:var(--accent); background:transparent; }
+.btn-sm { padding:3px 7px; font-size:10px; }
+
+/* Workspace */
+.workspace { display:flex; flex:1; min-height:0; }
+
+/* Player */
+.player { flex:1; display:flex; flex-direction:column; padding:10px; min-width:0; }
+.video-box { flex:1; background:#000; border-radius:var(--radius); display:flex; align-items:center; justify-content:center; position:relative; overflow:hidden; min-height:180px; }
+.video-box video { width:100%; height:100%; object-fit:contain; }
+.placeholder { text-align:center; color:var(--text2); font-size:14px; }
+.placeholder button { margin-top:10px; }
+.controls { display:flex; align-items:center; gap:10px; padding:6px 0; }
+#time { font-size:11px; color:var(--text2); font-family:monospace; }
+
+/* Panel */
+.panel { width:280px; background:var(--panel); border-left:1px solid var(--border); padding:10px; overflow-y:auto; flex-shrink:0; }
+.panel h3 { font-size:11px; color:var(--text2); text-transform:uppercase; margin-bottom:10px; padding-bottom:6px; border-bottom:1px solid var(--border); }
+.field { margin-bottom:10px; }
+.field label { display:block; font-size:10px; color:var(--text2); margin-bottom:3px; text-transform:uppercase; }
+.field textarea, .field input[type=number], .field select { width:100%; background:var(--bg); border:1px solid var(--border); color:var(--text); padding:5px 8px; border-radius:var(--radius); font-size:12px; font-family:inherit; }
+.field textarea { resize:vertical; }
+.hint { color:var(--muted); font-size:11px; text-align:center; padding:20px 8px; }
+
+/* TTS variants */
+.variant { display:flex; align-items:center; gap:6px; padding:6px; background:var(--bg); border:1px solid var(--border); border-radius:var(--radius); margin-bottom:5px; }
+.variant.selected { border-color:var(--green); background:rgba(46,204,113,.1); }
+.variant .vname { font-size:10px; color:var(--text2); min-width:45px; }
+.variant audio { height:26px; flex:1; min-width:0; }
+.variant .btn-sel { background:var(--green); border-color:var(--green); color:#fff; }
+.status { font-size:10px; margin-top:5px; }
+.status.loading { color:var(--yellow); }
+.status.error { color:var(--accent); }
+.status.ok { color:var(--green); }
+.audio-badge { display:flex; align-items:center; gap:5px; padding:6px; background:rgba(46,204,113,.1); border:1px solid var(--green); border-radius:var(--radius); font-size:11px; margin-top:6px; }
+.audio-badge span { flex:1; color:var(--green); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+/* Timeline */
+.timeline-section { flex-shrink:0; border-top:1px solid var(--border); background:var(--bg2); height:160px; display:flex; flex-direction:column; }
+.tl-toolbar { display:flex; gap:6px; padding:5px 10px; border-bottom:1px solid var(--border); align-items:center; }
+.tl-toolbar span { font-size:10px; color:var(--muted); margin-left:auto; }
+.tl-wrap { flex:1; position:relative; overflow-x:auto; overflow-y:hidden; }
+.ruler { height:22px; background:var(--bg); position:relative; border-bottom:1px solid var(--border); cursor:pointer; }
+.ruler-mark { position:absolute; top:0; height:100%; border-left:1px solid var(--border); font-size:8px; color:var(--muted); padding:2px 0 0 2px; user-select:none; }
+.ruler-mark.major { border-left-color:var(--text2); color:var(--text2); font-weight:600; }
+.playhead { position:absolute; top:0; bottom:0; width:2px; background:#e74c3c; z-index:100; pointer-events:none; }
+.playhead::before { content:''; position:absolute; top:0; left:-5px; width:12px; height:10px; background:#e74c3c; clip-path:polygon(50% 100%,0 0,100% 0); }
+.track { display:flex; min-height:50px; border-bottom:1px solid var(--border); }
+.track-label { width:70px; flex-shrink:0; display:flex; align-items:center; justify-content:center; font-size:9px; color:var(--muted); text-transform:uppercase; background:var(--bg); border-right:1px solid var(--border); }
+.track-content { flex:1; position:relative; min-height:50px; background:var(--panel); }
+
+/* Markers */
+.marker { position:absolute; top:6px; height:36px; background:var(--accent); border-radius:4px; cursor:grab; display:flex; align-items:center; padding:0 6px; font-size:10px; color:#fff; overflow:hidden; white-space:nowrap; user-select:none; min-width:24px; }
+.marker:hover { box-shadow:0 0 8px rgba(233,69,96,.5); }
+.marker.selected { background:var(--accent2); box-shadow:0 0 10px rgba(255,107,129,.7); z-index:10; }
+.marker.has-audio { background:var(--green); }
+.marker.has-audio.selected { background:#27ae60; }
+.marker .resize { position:absolute; right:0; top:0; bottom:0; width:5px; cursor:ew-resize; background:rgba(255,255,255,.2); border-radius:0 4px 4px 0; }
+
+/* Notifications */
+.notifs { position:fixed; top:50px; right:12px; z-index:9999; display:flex; flex-direction:column; gap:5px; }
+.notif { padding:8px 14px; border-radius:var(--radius); font-size:11px; animation:slideIn .3s; box-shadow:0 2px 8px rgba(0,0,0,.3); max-width:260px; }
+.notif.info { background:var(--blue); color:#fff; }
+.notif.ok { background:var(--green); color:#fff; }
+.notif.err { background:var(--accent); color:#fff; }
+@keyframes slideIn { from{transform:translateX(100%);opacity:0} to{transform:translateX(0);opacity:1} }
+
+/* Modal */
+.modal { position:fixed; inset:0; background:rgba(0,0,0,.7); display:flex; align-items:center; justify-content:center; z-index:1000; }
+.modal[hidden] { display:none; }
+.modal-box { background:var(--panel); border:1px solid var(--border); border-radius:var(--radius); padding:16px; min-width:280px; max-height:50vh; overflow-y:auto; }
+.modal-box h3 { margin-bottom:10px; font-size:14px; }
+.proj-item { padding:7px 10px; border:1px solid var(--border); border-radius:var(--radius); margin-bottom:5px; cursor:pointer; font-size:12px; }
+.proj-item:hover { border-color:var(--blue); background:rgba(52,152,219,.1); }
+
+::-webkit-scrollbar { width:7px; height:7px; }
+::-webkit-scrollbar-track { background:var(--bg); }
+::-webkit-scrollbar-thumb { background:var(--border); border-radius:4px; }
+</style>
+</head>
+<body>
+
+<!-- Toolbar -->
+<header class="toolbar">
+    <span class="logo">JarCut</span>
+    <div class="toolbar-actions">
+        <input id="proj-name" placeholder="Имя проекта" value="Мой проект">
+        <button onclick="saveProject()">💾 Сохранить</button>
+        <button onclick="showLoad()">📂 Открыть</button>
+        <button onclick="doExport()">🎬 Экспорт</button>
+    </div>
+</header>
+
+<!-- Workspace -->
+<main class="workspace">
+    <section class="player">
+        <div class="video-box" id="vbox">
+            <div class="placeholder" id="ph">
+                <p>🎥 Перетащите видео сюда</p>
+                <input type="file" id="vinput" accept="video/*" hidden>
+                <button onclick="document.getElementById('vinput').click()">Загрузить видео</button>
+            </div>
+            <video id="vid" controls hidden></video>
+        </div>
+        <div class="controls">
+            <button id="btn-play" disabled onclick="togglePlay()">▶ Play</button>
+            <span id="time">0:00 / 0:00</span>
+        </div>
+    </section>
+
+    <aside class="panel" id="panel">
+        <h3>Свойства маркера</h3>
+        <div id="no-sel" class="hint">Выберите маркер или создайте новый</div>
+        <div id="props" hidden>
+            <div class="field"><label>Текст</label><textarea id="p-text" rows="2" placeholder="Текст реплики..."></textarea></div>
+            <div class="field"><label>Начало (сек)</label><input type="number" id="p-start" step="0.1" min="0"></div>
+            <div class="field"><label>Длительность (сек)</label><input type="number" id="p-dur" step="0.1" min="0.1" value="2"></div>
+            <div class="field"><label>Язык</label>
+                <select id="p-lang"><option value="ru-RU">Русский</option><option value="en-US">English</option><option value="uz-UZ">O'zbek</option></select>
+            </div>
+            <button class="btn-primary" onclick="genTTS()" style="width:100%;margin-bottom:8px">🎙 Озвучить (3 варианта)</button>
+            <div id="tts-status" class="status"></div>
+            <div id="variants"></div>
+            <div class="field" style="margin-top:8px"><label>Или загрузить аудио</label><input type="file" id="p-audio" accept="audio/*" style="font-size:10px"></div>
+            <div id="audio-badge" class="audio-badge" hidden>
+                <span id="badge-name">—</span>
+                <button class="btn-sm" onclick="playAttached()">▶</button>
+                <button class="btn-sm btn-danger" onclick="removeAudio()">✕</button>
+            </div>
+            <button class="btn-danger" onclick="delMarker()" style="width:100%;margin-top:10px">🗑 Удалить</button>
+        </div>
+    </aside>
+</main>
+
+<!-- Timeline -->
+<section class="timeline-section">
+    <div class="tl-toolbar">
+        <button id="btn-add" disabled onclick="addMarker()">＋ Маркер</button>
+        <button onclick="zoom(1)">🔍+</button>
+        <button onclick="zoom(-1)">🔍−</button>
+        <span id="zoom-lbl">100%</span>
+    </div>
+    <div class="tl-wrap" id="tl-wrap">
+        <div class="ruler" id="ruler"></div>
+        <div class="playhead" id="playhead"></div>
+        <div class="track"><div class="track-label">Реплики</div><div class="track-content" id="track"></div></div>
+    </div>
+</section>
+
+<!-- Modal -->
+<div id="modal" class="modal" hidden>
+    <div class="modal-box">
+        <h3>Открыть проект</h3>
+        <div id="proj-list"></div>
+        <button onclick="document.getElementById('modal').hidden=true" style="width:100%;margin-top:8px">Закрыть</button>
+    </div>
+</div>
+
+<!-- Notifications -->
+<div class="notifs" id="notifs"></div>
+
+<script>
+/* ═══════════════════════════════════════════════════════════════════════════
+   JarCut — Весь JavaScript в одном месте
+═══════════════════════════════════════════════════════════════════════════ */
+
+// ─── Состояние ───────────────────────────────────────────────────────────────
+const S = {
+    markers: [], sel: null, videoFile: null, dur: 0, playing: false, nextId: 1,
+    pps: 80 // pixels per second
+};
+
+// ─── Утилиты ─────────────────────────────────────────────────────────────────
+function fmt(s) { if(isNaN(s))return'0:00'; const m=Math.floor(s/60),ss=Math.floor(s%60); return `${m}:${String(ss).padStart(2,'0')}`; }
+function notify(type, msg) {
+    const el = document.createElement('div');
+    el.className = `notif ${type}`;
+    el.textContent = msg;
+    document.getElementById('notifs').appendChild(el);
+    setTimeout(()=>{el.style.opacity='0';setTimeout(()=>el.remove(),300)},3500);
+}
+function getMarker(id) { return S.markers.find(m=>m.id===id); }
+
+// ─── Видео ───────────────────────────────────────────────────────────────────
+const vid = document.getElementById('vid');
+const vinput = document.getElementById('vinput');
+const vbox = document.getElementById('vbox');
+
+vinput.addEventListener('change', e => { if(e.target.files[0]) loadVideo(e.target.files[0]); });
+vbox.addEventListener('dragover', e => { e.preventDefault(); vbox.style.outline='2px dashed var(--accent)'; });
+vbox.addEventListener('dragleave', () => vbox.style.outline='');
+vbox.addEventListener('drop', e => { e.preventDefault(); vbox.style.outline=''; const f=e.dataTransfer.files[0]; if(f&&f.type.startsWith('video/'))loadVideo(f); });
+
+async function loadVideo(file) {
+    notify('info','Загрузка видео...');
+    const fd = new FormData(); fd.append('file', file);
+    const r = await fetch('/api/upload',{method:'POST',body:fd});
+    const d = await r.json();
+    if(!d.ok) { notify('err','Ошибка загрузки'); return; }
+    S.videoFile = d.filename;
+    vid.src = d.url; vid.hidden=false;
+    document.getElementById('ph').hidden=true;
+    vid.onloadedmetadata = () => {
+        S.dur = vid.duration;
+        document.getElementById('btn-play').disabled=false;
+        document.getElementById('btn-add').disabled=false;
+        renderRuler();
+        notify('ok',`Видео: ${fmt(S.dur)}`);
+    };
+}
+
+vid.addEventListener('timeupdate', () => {
+    document.getElementById('time').textContent = `${fmt(vid.currentTime)} / ${fmt(S.dur)}`;
+    movePlayhead(vid.currentTime);
+    audioSync(vid.currentTime);
+});
+vid.addEventListener('ended', () => { S.playing=false; document.getElementById('btn-play').textContent='▶ Play'; audioStopAll(); });
+
+function togglePlay() {
+    if(S.playing){vid.pause();audioPauseAll();document.getElementById('btn-play').textContent='▶ Play';}
+    else{vid.play();audioResumeAll(vid.currentTime);document.getElementById('btn-play').textContent='⏸ Пауза';}
+    S.playing=!S.playing;
+}
+document.addEventListener('keydown',e=>{if(e.target.tagName==='TEXTAREA'||e.target.tagName==='INPUT')return;if(e.code==='Space'){e.preventDefault();togglePlay();}});
+
+function seekTo(t){vid.currentTime=t;movePlayhead(t);audioSync(t);}
+
+// ─── Timeline ────────────────────────────────────────────────────────────────
+const ruler = document.getElementById('ruler');
+const track = document.getElementById('track');
+const playhead = document.getElementById('playhead');
+
+function renderRuler() {
+    ruler.innerHTML='';
+    const w = S.dur * S.pps;
+    ruler.style.width = w+'px';
+    track.style.width = w+'px';
+    let step = S.pps>=80?1:S.pps>=40?2:5;
+    for(let t=0;t<=S.dur;t+=step){
+        const mk=document.createElement('div');
+        mk.className='ruler-mark major';
+        mk.style.left=t*S.pps+'px';
+        mk.textContent=fmt(t);
+        ruler.appendChild(mk);
+    }
+}
+
+ruler.addEventListener('click',e=>{const x=e.clientX-ruler.getBoundingClientRect().left+document.getElementById('tl-wrap').scrollLeft;seekTo(Math.max(0,Math.min(x/S.pps,S.dur)));});
+
+function movePlayhead(t){playhead.style.left=(t*S.pps+70)+'px';}
+
+function zoom(dir){
+    S.pps=Math.max(20,Math.min(200,S.pps+dir*20));
+    document.getElementById('zoom-lbl').textContent=Math.round(S.pps/80*100)+'%';
+    renderRuler(); rerenderMarkers();
+}
+
+// ─── Маркеры ─────────────────────────────────────────────────────────────────
+function addMarker(startTime){
+    const m={id:'m'+(S.nextId++), text:'Реплика', startTime:startTime??vid.currentTime, duration:2, audioUrl:null, audioFile:null, lang:'ru-RU'};
+    S.markers.push(m);
+    renderMarkerEl(m);
+    selectMarker(m.id);
+    notify('info','Маркер добавлен');
+}
+
+function renderMarkerEl(m){
+    const el=document.createElement('div');
+    el.className='marker'+(m.audioUrl?' has-audio':'');
+    el.id='mel-'+m.id;
+    el.dataset.id=m.id;
+    el.style.left=m.startTime*S.pps+'px';
+    el.style.width=m.duration*S.pps+'px';
+    el.innerHTML=`<span>${m.text.substring(0,20)}</span><div class="resize"></div>`;
+    el.addEventListener('mousedown',e=>{if(!e.target.classList.contains('resize'))selectMarker(m.id);});
+    track.appendChild(el);
+}
+
+function updateMarkerEl(m){
+    const el=document.getElementById('mel-'+m.id);
+    if(!el)return;
+    el.style.left=m.startTime*S.pps+'px';
+    el.style.width=m.duration*S.pps+'px';
+    el.querySelector('span').textContent=m.text.substring(0,20);
+    el.className='marker'+(m.audioUrl?' has-audio':'')+(S.sel===m.id?' selected':'');
+}
+
+function rerenderMarkers(){track.innerHTML='';S.markers.forEach(m=>{renderMarkerEl(m);});if(S.sel)highlightMarker(S.sel);}
+
+function highlightMarker(id){track.querySelectorAll('.marker').forEach(e=>e.classList.remove('selected'));const el=document.getElementById('mel-'+id);if(el)el.classList.add('selected');}
+
+function selectMarker(id){S.sel=id;highlightMarker(id);updatePanel();}
+
+function delMarker(){
+    if(!S.sel)return;
+    S.markers=S.markers.filter(m=>m.id!==S.sel);
+    const el=document.getElementById('mel-'+S.sel);if(el)el.remove();
+    audioRemove(S.sel);
+    S.sel=null;updatePanel();notify('info','Удалён');
+}
+
+// ─── Drag & Resize ───────────────────────────────────────────────────────────
+let drag=null;
+document.addEventListener('mousedown',e=>{
+    const mel=e.target.closest('.marker');
+    if(!mel||!track.contains(mel))return;
+    e.preventDefault();
+    const id=mel.dataset.id;
+    selectMarker(id);
+    drag={id,resize:e.target.classList.contains('resize'),sx:e.clientX,sl:parseFloat(mel.style.left),sw:parseFloat(mel.style.width),el:mel};
+});
+document.addEventListener('mousemove',e=>{
+    if(!drag)return;
+    const m=getMarker(drag.id);if(!m)return;
+    const dx=e.clientX-drag.sx;
+    if(drag.resize){let w=Math.max(S.pps*.2,drag.sw+dx);m.duration=w/S.pps;drag.el.style.width=w+'px';}
+    else{let l=Math.max(0,drag.sl+dx);m.startTime=l/S.pps;drag.el.style.left=l+'px';}
+});
+document.addEventListener('mouseup',()=>{if(drag){const m=getMarker(drag.id);if(m&&m.audioUrl)audioUpdateTime(m.id,m.startTime);updatePanel();drag=null;}});
+
+// ─── Panel ───────────────────────────────────────────────────────────────────
+const pText=document.getElementById('p-text'), pStart=document.getElementById('p-start'), pDur=document.getElementById('p-dur'), pLang=document.getElementById('p-lang');
+
+function updatePanel(){
+    const m=S.sel?getMarker(S.sel):null;
+    document.getElementById('no-sel').hidden=!!m;
+    document.getElementById('props').hidden=!m;
+    if(!m)return;
+    pText.value=m.text; pStart.value=m.startTime.toFixed(1); pDur.value=m.duration.toFixed(1); pLang.value=m.lang;
+    document.getElementById('variants').innerHTML='';
+    document.getElementById('tts-status').textContent='';
+    const badge=document.getElementById('audio-badge');
+    if(m.audioUrl){badge.hidden=false;document.getElementById('badge-name').textContent=m.audioFile||'аудио';}
+    else badge.hidden=true;
+}
+pText.addEventListener('input',()=>{const m=getMarker(S.sel);if(m){m.text=pText.value;updateMarkerEl(m);}});
+pStart.addEventListener('change',()=>{const m=getMarker(S.sel);if(m){m.startTime=+pStart.value||0;updateMarkerEl(m);}});
+pDur.addEventListener('change',()=>{const m=getMarker(S.sel);if(m){m.duration=+pDur.value||1;updateMarkerEl(m);}});
+pLang.addEventListener('change',()=>{const m=getMarker(S.sel);if(m)m.lang=pLang.value;});
+
+document.getElementById('p-audio').addEventListener('change',async e=>{
+    const f=e.target.files[0];if(!f)return;const m=getMarker(S.sel);if(!m)return;
+    const fd=new FormData();fd.append('file',f);
+    const r=await fetch('/api/upload',{method:'POST',body:fd});const d=await r.json();
+    if(d.ok){attachAudio(m.id,d.url,d.filename);notify('ok','Аудио прикреплено');}
+});
+
+function attachAudio(id,url,file){
+    const m=getMarker(id);if(!m)return;
+    m.audioUrl=url;m.audioFile=file;
+    audioRegister(id,url,m.startTime);
+    updateMarkerEl(m);updatePanel();
+}
+function removeAudio(){const m=getMarker(S.sel);if(!m)return;m.audioUrl=null;m.audioFile=null;audioRemove(m.id);updateMarkerEl(m);updatePanel();}
+function playAttached(){const m=getMarker(S.sel);if(m&&m.audioUrl)audioPreview(m.audioUrl);}
+
+// ─── TTS ─────────────────────────────────────────────────────────────────────
+async function genTTS(){
+    const m=getMarker(S.sel);if(!m||!m.text.trim()){notify('err','Введите текст');return;}
+    const st=document.getElementById('tts-status');const box=document.getElementById('variants');
+    st.className='status loading';st.textContent='⏳ Генерация...';
+    box.innerHTML='<div class="variant" style="opacity:.5"><span class="vname">...</span></div>'.repeat(3);
+    try{
+        const r=await fetch('/api/tts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:m.text,variants:3,language:m.lang})});
+        const d=await r.json();
+        if(!d.ok)throw new Error(d.detail||'Ошибка');
+        const ok=d.variants.filter(v=>v.status==='ok').length;
+        st.className=`status ${ok?'ok':'error'}`;st.textContent=ok?`✓ ${ok} вариант(ов)`:'✗ Ошибки';
+        box.innerHTML='';
+        d.variants.forEach(v=>{
+            const div=document.createElement('div');div.className='variant';
+            if(v.status!=='ok'){div.innerHTML=`<span class="vname">${v.voice}</span><span style="color:var(--accent);font-size:10px">✗ ${v.error||'ошибка'}</span>`;box.appendChild(div);return;}
+            div.innerHTML=`<span class="vname">${v.voice}</span><audio controls preload="auto" src="${v.url}"></audio><button class="btn-sm btn-sel">✓</button>`;
+            div.querySelector('.btn-sel').onclick=()=>{
+                box.querySelectorAll('.variant').forEach(x=>x.classList.remove('selected'));
+                div.classList.add('selected');
+                attachAudio(m.id,v.url,v.url.split('/').pop());
+                notify('ok',`Голос "${v.voice}" выбран`);
+            };
+            box.appendChild(div);
+        });
+    }catch(e){st.className='status error';st.textContent='✗ '+e.message;notify('err','TTS: '+e.message);}
+}
+
+// ─── Audio Engine (Web Audio API) ────────────────────────────────────────────
+let actx=null;
+const buffers={}, sources={}, timings={};
+function getCtx(){if(!actx)actx=new(window.AudioContext||window.webkitAudioContext)();if(actx.state==='suspended')actx.resume();return actx;}
+
+async function audioRegister(id,url,start){
+    timings[id]=start;
+    try{const ctx=getCtx();const r=await fetch(url);const ab=await r.arrayBuffer();buffers[id]=await ctx.decodeAudioData(ab);}catch(e){console.warn('audio load err',e);}
+}
+function audioRemove(id){audioStop(id);delete buffers[id];delete timings[id];}
+function audioUpdateTime(id,t){timings[id]=t;audioStop(id);}
+
+function audioSync(t){
+    if(!S.playing)return;
+    S.markers.forEach(m=>{
+        if(!m.audioUrl||!buffers[m.id])return;
+        const st=timings[m.id]??m.startTime, end=st+buffers[m.id].duration;
+        const playing=!!sources[m.id];
+        if(t>=st&&t<end&&!playing)audioPlay(m.id,t-st);
+        else if((t<st||t>=end)&&playing)audioStop(m.id);
+    });
+}
+function audioPlay(id,offset=0){
+    audioStop(id);const ctx=getCtx();const src=ctx.createBufferSource();src.buffer=buffers[id];src.connect(ctx.destination);src.start(0,offset);sources[id]=src;src.onended=()=>delete sources[id];
+}
+function audioStop(id){if(sources[id]){try{sources[id].stop();}catch(e){}delete sources[id];}}
+function audioPauseAll(){Object.keys(sources).forEach(audioStop);}
+function audioStopAll(){audioPauseAll();}
+function audioResumeAll(t){audioSync(t);}
+
+let prevSrc=null;
+async function audioPreview(url){
+    if(prevSrc){try{prevSrc.stop();}catch(e){}}
+    const ctx=getCtx();const r=await fetch(url);const ab=await r.arrayBuffer();const buf=await ctx.decodeAudioData(ab);
+    prevSrc=ctx.createBufferSource();prevSrc.buffer=buf;prevSrc.connect(ctx.destination);prevSrc.start(0);
+}
+
+// ─── Проекты ─────────────────────────────────────────────────────────────────
+async function saveProject(){
+    const name=document.getElementById('proj-name').value.trim()||'project';
+    const data={videoFile:S.videoFile,markers:S.markers.map(m=>({id:m.id,text:m.text,startTime:m.startTime,duration:m.duration,audioUrl:m.audioUrl,audioFile:m.audioFile,lang:m.lang}))};
+    await fetch('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,data})});
+    notify('ok',`Сохранено: ${name}`);
+}
+async function showLoad(){
+    document.getElementById('modal').hidden=false;
+    const r=await fetch('/api/projects');const d=await r.json();
+    const box=document.getElementById('proj-list');
+    if(!d.list||!d.list.length){box.innerHTML='<p class="hint">Нет проектов</p>';return;}
+    box.innerHTML=d.list.map(p=>`<div class="proj-item" onclick="loadProject('${p.name}')">${p.name}</div>`).join('');
+}
+async function loadProject(name){
+    document.getElementById('modal').hidden=true;
+    const r=await fetch(`/api/load/${encodeURIComponent(name)}`);const d=await r.json();
+    if(!d.ok)return;
+    const p=d.project.data;document.getElementById('proj-name').value=d.project.name;
+    S.markers=[];S.sel=null;audioStopAll();track.innerHTML='';
+    if(p.videoFile){
+        vid.src='/uploads/'+p.videoFile;vid.hidden=false;document.getElementById('ph').hidden=true;S.videoFile=p.videoFile;
+        vid.onloadedmetadata=()=>{
+            S.dur=vid.duration;document.getElementById('btn-play').disabled=false;document.getElementById('btn-add').disabled=false;renderRuler();
+            (p.markers||[]).forEach(m=>{const n=parseInt(m.id.replace('m',''));if(n>=S.nextId)S.nextId=n+1;S.markers.push(m);renderMarkerEl(m);if(m.audioUrl)audioRegister(m.id,m.audioUrl,m.startTime);});
+            notify('ok','Проект загружен');
+        };
+    }
+}
+
+// ─── Экспорт ─────────────────────────────────────────────────────────────────
+async function doExport(){
+    if(!S.videoFile){notify('err','Нет видео');return;}
+    const ms=S.markers.filter(m=>m.audioFile);
+    if(!ms.length){notify('err','Нет маркеров с аудио');return;}
+    notify('info','Экспорт...');
+    const r=await fetch('/api/export',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({video:S.videoFile,markers:ms.map(m=>({audio:m.audioFile,start:m.startTime}))})});
+    const d=await r.json();
+    if(d.ok)notify('ok','Готово: '+d.url); else notify('err',d.error||'Ошибка');
+}
+</script>
+</body>
+</html>
