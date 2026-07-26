@@ -5,8 +5,12 @@
 """
 
 import base64
+import difflib
+import importlib.util
 import json
+import math
 import os
+import re
 import struct
 import subprocess
 import tempfile
@@ -36,6 +40,9 @@ TTS_MODEL = os.getenv(
     "VERTEX_TTS_MODEL",
     os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
 )
+ALIGNMENT_MODE = os.getenv("ALIGNMENT_MODE", "hybrid").strip().lower()
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small").strip() or "small"
+ALIGNMENT_LOW_CONFIDENCE = 0.45
 
 BASE = Path(__file__).resolve().parent
 UPLOADS = BASE / "uploads"
@@ -91,6 +98,15 @@ def resolved_vertex_mode() -> str:
     )
 
 
+def resolved_alignment_mode() -> str:
+    if ALIGNMENT_MODE not in {"off", "fast", "hybrid", "precise"}:
+        raise ValueError(
+            "ALIGNMENT_MODE должен быть off, fast, hybrid или precise "
+            f"(сейчас: {ALIGNMENT_MODE or 'пусто'})"
+        )
+    return ALIGNMENT_MODE
+
+
 def vertex_model_url(model: str) -> str:
     """Build a Vertex AI Express or Standard GenerateContent endpoint."""
     mode = resolved_vertex_mode()
@@ -113,7 +129,9 @@ def vertex_headers() -> dict[str, str]:
     return {"Content-Type": "application/json", "x-goog-api-key": API_KEY}
 
 
-def vertex_public_config() -> dict[str, str]:
+def vertex_public_config() -> dict[str, Any]:
+    alignment_mode = resolved_alignment_mode()
+    alignment_dependency_available = importlib.util.find_spec("faster_whisper") is not None
     return {
         "backend": "Vertex AI",
         "mode": resolved_vertex_mode(),
@@ -121,6 +139,10 @@ def vertex_public_config() -> dict[str, str]:
         "location": VERTEX_LOCATION if resolved_vertex_mode() == "standard" else "global",
         "transcribeModel": TRANSCRIBE_MODEL,
         "ttsModel": TTS_MODEL,
+        "alignmentMode": alignment_mode,
+        "alignmentAvailable": alignment_mode == "off" or alignment_dependency_available,
+        "alignmentDependencyAvailable": alignment_dependency_available,
+        "whisperModel": WHISPER_MODEL if alignment_mode in {"hybrid", "precise"} else "disabled",
     }
 
 
@@ -207,6 +229,8 @@ async def diagnostics() -> dict[str, Any]:
     try:
         public_config = vertex_public_config()
     except ValueError as exc:
+        message = str(exc)
+        alignment_error = "ALIGNMENT_MODE" in message
         return {
             "backend": "Vertex AI",
             "mode": VERTEX_MODE or "invalid",
@@ -214,11 +238,17 @@ async def diagnostics() -> dict[str, Any]:
             "location": VERTEX_LOCATION,
             "transcribeModel": TRANSCRIBE_MODEL,
             "ttsModel": TTS_MODEL,
+            "alignmentMode": ALIGNMENT_MODE or "invalid",
+            "alignmentAvailable": importlib.util.find_spec("faster_whisper") is not None,
             "checkMethod": "GenerateContent",
             "ok": False,
-            "code": "VERTEX_CONFIG_ERROR",
-            "message": str(exc),
-            "help": ["Укажите VERTEX_MODE=express, standard или auto в .env."],
+            "code": "ALIGNMENT_CONFIG_ERROR" if alignment_error else "VERTEX_CONFIG_ERROR",
+            "message": message,
+            "help": [
+                "Укажите ALIGNMENT_MODE=off, fast, hybrid или precise в .env."
+                if alignment_error
+                else "Укажите VERTEX_MODE=express, standard или auto в .env."
+            ],
         }
 
     base_result = {
@@ -298,6 +328,472 @@ def extract_audio(source: Path, target: Path) -> bool:
         return False
 
 
+def _mark_overlap_segments(segments: list[dict[str, Any]]) -> None:
+    """Mark meaningful cross-speaker overlap while ignoring timestamp rounding noise."""
+    for index, segment in enumerate(segments):
+        start = float(segment.get("start", 0))
+        end = float(segment.get("end", start))
+        speaker_id = str(segment.get("speaker_id", ""))
+        segment["is_overlap"] = any(
+            other_index != index
+            and str(other.get("speaker_id", "")) != speaker_id
+            and min(end, float(other.get("end", 0)))
+            - max(start, float(other.get("start", 0))) >= 0.08
+            for other_index, other in enumerate(segments)
+        )
+
+
+def run_silero_vad(source: Path) -> tuple[Any | None, list[dict[str, float]], str | None]:
+    """Decode media and run the Silero v6 ONNX model bundled with faster-whisper."""
+    try:
+        from faster_whisper.audio import decode_audio
+        from faster_whisper.vad import VadOptions, get_speech_timestamps
+    except ImportError:
+        return None, [], "faster-whisper не установлен"
+
+    try:
+        audio = decode_audio(str(source), sampling_rate=16000)
+        timestamps = get_speech_timestamps(
+            audio,
+            VadOptions(
+                threshold=0.5,
+                min_speech_duration_ms=80,
+                min_silence_duration_ms=100,
+                speech_pad_ms=15,
+                max_speech_duration_s=30,
+            ),
+            sampling_rate=16000,
+        )
+        regions = [
+            {"start": item["start"] / 16000, "end": item["end"] / 16000}
+            for item in timestamps
+            if item["end"] > item["start"]
+        ]
+        return audio, regions, None
+    except Exception as exc:
+        return None, [], f"Silero VAD не запустился: {exc}"
+
+
+def _match_components(segment: dict[str, Any], region: dict[str, float]) -> tuple[float, float, float]:
+    g_start, g_end = float(segment["start"]), float(segment["end"])
+    v_start, v_end = region["start"], region["end"]
+    intersection = max(0.0, min(g_end, v_end) - max(g_start, v_start))
+    union = max(g_end, v_end) - min(g_start, v_start)
+    iou = intersection / union if union > 0 else 0.0
+    start_score = max(0.0, 1.0 - abs(g_start - v_start) / 1.5)
+    g_duration, v_duration = max(0.1, g_end - g_start), max(0.1, v_end - v_start)
+    duration_score = max(0.0, 1.0 - abs(g_duration - v_duration) / max(g_duration, v_duration))
+    return iou, start_score, duration_score
+
+
+def _region_match_score(segment: dict[str, Any], region: dict[str, float]) -> float:
+    iou, start_score, duration_score = _match_components(segment, region)
+    overlap_penalty = 2.0 if segment.get("is_overlap") else 0.0
+    return 3.0 * iou + 2.0 * start_score + 1.5 * duration_score + 0.5 - overlap_penalty
+
+
+def _assign_regions_monotonic(
+    segments: list[dict[str, Any]], regions: list[dict[str, float]]
+) -> list[int | None]:
+    """Assign ordered segments to non-decreasing VAD regions with reuse penalties."""
+    if not segments or not regions:
+        return [None] * len(segments)
+
+    count = len(regions)
+    previous = [
+        _region_match_score(segments[0], region) - 0.25 * index
+        for index, region in enumerate(regions)
+    ]
+    parents: list[list[int]] = []
+
+    for segment in segments[1:]:
+        current = [-math.inf] * count
+        row_parents = [0] * count
+        for region_index, region in enumerate(regions):
+            best_score, best_previous = -math.inf, 0
+            for previous_index in range(region_index + 1):
+                reuse_penalty = 1.0 if previous_index == region_index else 0.0
+                skipped_penalty = 0.25 * max(0, region_index - previous_index - 1)
+                candidate = previous[previous_index] - reuse_penalty - skipped_penalty
+                if candidate > best_score:
+                    best_score, best_previous = candidate, previous_index
+            current[region_index] = best_score + _region_match_score(segment, region)
+            row_parents[region_index] = best_previous
+        previous = current
+        parents.append(row_parents)
+
+    region_index = max(range(count), key=lambda index: previous[index])
+    assignments = [region_index]
+    for row in reversed(parents):
+        region_index = row[region_index]
+        assignments.append(region_index)
+    assignments.reverse()
+    return assignments
+
+
+def _energy_split_boundaries(
+    audio: Any,
+    region: dict[str, float],
+    group: list[dict[str, Any]],
+    sampling_rate: int = 16000,
+) -> list[float] | None:
+    """Find speech onsets after local energy valleys inside one shared VAD region."""
+    try:
+        import numpy as np
+    except ImportError:
+        return None
+
+    if len(group) < 2:
+        return []
+    start_sample = max(0, int(region["start"] * sampling_rate))
+    end_sample = min(len(audio), int(region["end"] * sampling_rate))
+    signal = audio[start_sample:end_sample]
+    frame, hop = int(0.02 * sampling_rate), int(0.01 * sampling_rate)
+    if len(signal) < frame * 3:
+        return None
+
+    energies = np.array([
+        float(np.sqrt(np.mean(signal[offset:offset + frame] ** 2) + 1e-12))
+        for offset in range(0, len(signal) - frame + 1, hop)
+    ])
+    boundaries: list[float] = []
+    for left, right in zip(group, group[1:]):
+        expected = (float(left["end"]) + float(right["start"])) / 2
+        search_start = max(region["start"] + 0.08, expected - 0.45)
+        search_end = min(region["end"] - 0.08, expected + 0.45)
+        first = max(0, int((search_start - region["start"]) * sampling_rate / hop))
+        last = min(len(energies), int((search_end - region["start"]) * sampling_rate / hop) + 1)
+        if last - first < 3:
+            return None
+        local = energies[first:last]
+        valley_relative = int(np.argmin(local))
+        valley_index = first + valley_relative
+        median = float(np.median(local))
+        valley = float(energies[valley_index])
+        depth_db = 20 * math.log10((median + 1e-9) / (valley + 1e-9))
+        if depth_db < 6.0:
+            return None
+        rise_threshold = valley + 0.35 * max(0.0, median - valley)
+        onset_index = valley_index
+        while onset_index + 1 < last and energies[onset_index] < rise_threshold:
+            onset_index += 1
+        boundary = region["start"] + onset_index * hop / sampling_rate
+        if boundaries and boundary - boundaries[-1] < 0.08:
+            return None
+        boundaries.append(boundary)
+    return boundaries
+
+
+def _alignment_confidence(
+    segment: dict[str, Any],
+    region: dict[str, float],
+    shared: bool,
+    split_succeeded: bool,
+) -> float:
+    iou, start_score, duration_score = _match_components(segment, region)
+    confidence = 0.45 * iou + 0.35 * start_score + 0.20 * duration_score
+    if segment.get("is_overlap"):
+        confidence *= 0.55
+    if shared:
+        confidence *= 0.85 if split_succeeded else 0.55
+    if start_score < 0.2 or iou < 0.05:
+        confidence = min(confidence, 0.35)
+    return round(max(0.0, min(1.0, confidence)), 3)
+
+
+def align_segments_with_vad(
+    segments: list[dict[str, Any]], audio: Any, regions: list[dict[str, float]]
+) -> list[dict[str, Any]]:
+    # Overlapping voices cannot be separated by VAD, so exclude them from the
+    # monotonic path rather than letting them distort neighboring assignments.
+    normal_indices = [index for index, segment in enumerate(segments) if not segment.get("is_overlap")]
+    normal_segments = [segments[index] for index in normal_indices]
+    normal_assignments = _assign_regions_monotonic(normal_segments, regions)
+    assignments: list[int | None] = [None] * len(segments)
+    for index, assignment in zip(normal_indices, normal_assignments):
+        assignments[index] = assignment
+
+    weak_vad_indices: set[int] = set()
+    for index, assignment in enumerate(assignments):
+        if assignment is None:
+            continue
+        iou, start_score, _ = _match_components(segments[index], regions[assignment])
+        if iou < 0.03 and start_score < 0.25:
+            assignments[index] = None
+            weak_vad_indices.add(index)
+
+    # If a region already has a genuine overlap match, do not let a nearby
+    # zero-overlap segment join and split that region away from the real line.
+    provisional_groups: dict[int, list[int]] = {}
+    for index, assignment in enumerate(assignments):
+        if assignment is not None:
+            provisional_groups.setdefault(assignment, []).append(index)
+    for assignment, indices in provisional_groups.items():
+        if len(indices) < 2:
+            continue
+        overlap_by_index = {
+            index: _match_components(segments[index], regions[assignment])[0]
+            for index in indices
+        }
+        if any(iou >= 0.03 for iou in overlap_by_index.values()):
+            for index, iou in overlap_by_index.items():
+                if iou < 0.03:
+                    assignments[index] = None
+                    weak_vad_indices.add(index)
+
+    grouped: dict[int, list[int]] = {}
+    for index, assignment in enumerate(assignments):
+        if assignment is not None:
+            grouped.setdefault(assignment, []).append(index)
+
+    for index, segment in enumerate(segments):
+        segment["gemini_start"] = float(segment["start"])
+        segment["gemini_end"] = float(segment["end"])
+        segment["manual_offset"] = 0.0
+        assignment = assignments[index]
+        if assignment is None:
+            is_overlap = bool(segment.get("is_overlap"))
+            warning = "overlap" if is_overlap else "weak_vad_match" if index in weak_vad_indices else "no_vad_match"
+            segment.update({
+                "auto_start": segment["gemini_start"],
+                "auto_end": segment["gemini_end"],
+                "alignment_method": "gemini_fallback",
+                "alignment_confidence": 0.2 if is_overlap else 0.0,
+                "alignment_warning": warning,
+            })
+            continue
+
+        region = regions[assignment]
+        indices = grouped[assignment]
+        group = [segments[item] for item in indices]
+        shared = len(group) > 1
+        boundaries = _energy_split_boundaries(audio, region, group) if shared else []
+        split_succeeded = boundaries is not None
+
+        if not shared:
+            auto_start, auto_end = region["start"], region["end"]
+        elif split_succeeded:
+            position = indices.index(index)
+            edges = [region["start"], *boundaries, region["end"]]
+            auto_start, auto_end = edges[position], edges[position + 1]
+        else:
+            group_start = min(float(item["start"]) for item in group)
+            group_end = max(float(item["end"]) for item in group)
+            span = max(0.1, group_end - group_start)
+            scale = (region["end"] - region["start"]) / span
+            auto_start = region["start"] + (float(segment["start"]) - group_start) * scale
+            auto_end = region["start"] + (float(segment["end"]) - group_start) * scale
+
+        auto_start = max(0.0, round(auto_start, 3))
+        auto_end = max(auto_start + 0.2, round(auto_end, 3))
+        confidence = _alignment_confidence(segment, region, shared, split_succeeded)
+        warning = None
+        if shared:
+            warning = "split_region" if split_succeeded else "split_uncertain"
+        segment.update({
+            "auto_start": auto_start,
+            "auto_end": auto_end,
+            "alignment_method": "silero",
+            "alignment_confidence": confidence,
+            "alignment_warning": warning,
+        })
+
+    return segments
+
+
+def _normalize_words(text: str) -> list[str]:
+    return [
+        token
+        for token in re.sub(r"[^\w\s]", " ", str(text or "").casefold(), flags=re.UNICODE).split()
+        if token
+    ]
+
+
+def merge_alignment_windows(segments: list[dict[str, Any]], precise_all: bool = False) -> list[dict[str, Any]]:
+    candidates = [
+        segment for segment in segments
+        if not segment.get("is_overlap")
+        and (precise_all or float(segment.get("alignment_confidence", 0)) < ALIGNMENT_LOW_CONFIDENCE)
+    ]
+    candidates.sort(key=lambda item: item["gemini_start"])
+    windows: list[dict[str, Any]] = []
+    for segment in candidates:
+        start = max(0.0, float(segment["gemini_start"]) - 0.6)
+        end = float(segment["gemini_end"]) + 0.6
+        if windows and start - windows[-1]["end"] <= 1.0:
+            windows[-1]["end"] = max(windows[-1]["end"], end)
+            windows[-1]["segment_ids"].append(id(segment))
+        else:
+            windows.append({"start": start, "end": end, "segment_ids": [id(segment)]})
+    return windows
+
+
+_WHISPER_INSTANCE: Any = None
+
+
+def _get_whisper_model() -> Any:
+    global _WHISPER_INSTANCE
+    if _WHISPER_INSTANCE is None:
+        from faster_whisper import WhisperModel
+        model_cache = BASE / ".models"
+        model_cache.mkdir(exist_ok=True)
+        _WHISPER_INSTANCE = WhisperModel(
+            WHISPER_MODEL,
+            device="cpu",
+            compute_type="int8",
+            cpu_threads=max(1, min(4, os.cpu_count() or 1)),
+            download_root=str(model_cache),
+        )
+    return _WHISPER_INSTANCE
+
+
+def run_whisper_for_windows(source: Path, windows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not windows:
+        return []
+    model = _get_whisper_model()
+    clip_timestamps: list[float] = []
+    for window in windows:
+        clip_timestamps.extend([window["start"], window["end"]])
+    transcription, _ = model.transcribe(
+        str(source),
+        word_timestamps=True,
+        clip_timestamps=clip_timestamps,
+        beam_size=3,
+        condition_on_previous_text=False,
+        vad_filter=False,
+    )
+    words: list[dict[str, Any]] = []
+    for item in transcription:
+        for word in item.words or []:
+            normalized = _normalize_words(word.word)
+            if normalized:
+                words.append({
+                    "word": normalized[0],
+                    "start": float(word.start),
+                    "end": float(word.end),
+                    "probability": float(word.probability or 0),
+                })
+    return words
+
+
+def _best_word_sequence(
+    segment: dict[str, Any],
+    words: list[dict[str, Any]],
+    min_word_start: float = -math.inf,
+) -> tuple[float, float, float] | None:
+    target = _normalize_words(str(segment.get("original") or ""))
+    if not target:
+        return None
+    window_start = float(segment["gemini_start"]) - 1.5
+    window_end = float(segment["gemini_end"]) + 1.5
+    candidates = [
+        word for word in words
+        if word["start"] >= min_word_start - 0.001
+        and word["end"] >= window_start
+        and word["start"] <= window_end
+    ]
+    if not candidates:
+        return None
+
+    target_text = " ".join(target)
+    expected_start = float(segment["gemini_start"])
+    best: tuple[float, float, float] | None = None
+    min_length, max_length = max(1, len(target) - 3), len(target) + 4
+    for start_index in range(len(candidates)):
+        for length in range(min_length, max_length + 1):
+            chosen = candidates[start_index:start_index + length]
+            if not chosen:
+                continue
+            ratio = difflib.SequenceMatcher(
+                None, target_text, " ".join(word["word"] for word in chosen)
+            ).ratio()
+            proximity = max(0.0, 1.0 - abs(chosen[0]["start"] - expected_start) / 1.5)
+            probability = sum(word["probability"] for word in chosen) / len(chosen)
+            score = 0.70 * ratio + 0.15 * proximity + 0.15 * probability
+            if best is None or score > best[0]:
+                best = (score, chosen[0]["start"], chosen[-1]["end"])
+    return best
+
+
+def refine_segments_with_whisper(
+    segments: list[dict[str, Any]], words: list[dict[str, Any]], precise_all: bool = False
+) -> int:
+    refined = 0
+    consumed_until = -math.inf
+    candidates = sorted(
+        (
+            segment for segment in segments
+            if not segment.get("is_overlap")
+            and (
+                precise_all
+                or float(segment.get("alignment_confidence", 0)) < ALIGNMENT_LOW_CONFIDENCE
+            )
+        ),
+        key=lambda item: (float(item["gemini_start"]), float(item["gemini_end"])),
+    )
+    for segment in candidates:
+        match = _best_word_sequence(segment, words, min_word_start=consumed_until)
+        if match is None or match[0] < 0.55:
+            continue
+        score, start, end = match
+        segment.update({
+            "auto_start": round(max(0.0, start), 3),
+            "auto_end": round(max(start + 0.2, end), 3),
+            "alignment_method": "whisper",
+            "alignment_confidence": round(min(0.95, score), 3),
+            "alignment_warning": None if score >= 0.7 else "whisper_low_text_match",
+        })
+        consumed_until = end
+        refined += 1
+    return refined
+
+
+def apply_hybrid_alignment(source: Path, segments: list[dict[str, Any]]) -> dict[str, Any]:
+    mode = resolved_alignment_mode()
+    _mark_overlap_segments(segments)
+    for segment in segments:
+        segment.setdefault("gemini_start", float(segment["start"]))
+        segment.setdefault("gemini_end", float(segment["end"]))
+        segment.setdefault("manual_offset", 0.0)
+        segment.setdefault("auto_start", float(segment["start"]))
+        segment.setdefault("auto_end", float(segment["end"]))
+        segment.setdefault("alignment_method", "gemini_fallback")
+        segment.setdefault("alignment_confidence", 0.0)
+        segment.setdefault("alignment_warning", "alignment_disabled" if mode == "off" else None)
+
+    if mode == "off":
+        return {"mode": mode, "vadRegions": 0, "whisperRefined": 0, "warning": None}
+
+    audio, regions, warning = run_silero_vad(source)
+    if audio is not None and regions:
+        align_segments_with_vad(segments, audio, regions)
+
+    whisper_refined = 0
+    if mode in {"hybrid", "precise"} and importlib.util.find_spec("faster_whisper") is not None:
+        windows = merge_alignment_windows(segments, precise_all=mode == "precise")
+        if windows:
+            try:
+                words = run_whisper_for_windows(source, windows)
+                whisper_refined = refine_segments_with_whisper(
+                    segments, words, precise_all=mode == "precise"
+                )
+            except Exception as exc:
+                warning = f"Precise fallback недоступен: {exc}"
+
+    for segment in segments:
+        segment["start"] = float(segment["auto_start"]) + float(segment.get("manual_offset", 0))
+        segment["end"] = float(segment["auto_end"]) + float(segment.get("manual_offset", 0))
+        segment["effective_start"] = segment["start"]
+        segment["effective_end"] = segment["end"]
+
+    return {
+        "mode": mode,
+        "vadRegions": len(regions),
+        "whisperRefined": whisper_refined,
+        "warning": warning,
+    }
+
+
 def letter_count(text: Any) -> int:
     """Count Unicode letters while ignoring spaces, punctuation, digits, and apostrophes."""
     apostrophes = {"'", "’", "‘", "ʻ", "ʼ", "`"}
@@ -305,6 +801,37 @@ def letter_count(text: Any) -> int:
         character.isalpha() and character not in apostrophes
         for character in str(text or "")
     )
+
+
+def normalize_segment_prosody(segment: dict[str, Any]) -> None:
+    allowed_pace = {"slow", "normal", "fast"}
+    allowed_energy = {"low", "medium", "high", "whisper"}
+    allowed_pitch = {"flat", "rising", "falling", "rising_falling", "variable"}
+    pace = str(segment.get("pace") or "normal").lower()
+    energy = str(segment.get("energy") or "medium").lower()
+    pitch = str(segment.get("pitch_tendency") or "variable").lower()
+    segment["pace"] = pace if pace in allowed_pace else "normal"
+    segment["energy"] = energy if energy in allowed_energy else "medium"
+    segment["pitch_tendency"] = pitch if pitch in allowed_pitch else "variable"
+    segment["intonation_contour"] = str(segment.get("intonation_contour") or "natural").strip()[:200]
+    segment["delivery_instruction"] = str(
+        segment.get("delivery_instruction") or "Perform naturally and preserve the original emotion."
+    ).strip()[:300]
+    emphasized = segment.get("emphasized_words")
+    segment["emphasized_words"] = [str(item).strip() for item in emphasized[:8] if str(item).strip()] if isinstance(emphasized, list) else []
+    pauses = segment.get("pauses")
+    normalized_pauses = []
+    if isinstance(pauses, list):
+        for pause in pauses[:6]:
+            if not isinstance(pause, dict):
+                continue
+            try:
+                word_index = max(0, int(pause.get("after_word_index", 0)))
+                duration_ms = max(100, min(800, int(pause.get("duration_ms", 150))))
+            except (TypeError, ValueError):
+                continue
+            normalized_pauses.append({"after_word_index": word_index, "duration_ms": duration_ms})
+    segment["pauses"] = normalized_pauses
 
 
 def professional_prompt(target_language: str, max_extra_letters: int | None = None) -> str:
@@ -341,7 +868,14 @@ Return exactly one JSON object with this structure:
       "speaker_id": "S1",
       "original": "exact original speech",
       "translated": "natural dubbing translation",
-      "emotion": "neutral|happy|sad|angry|excited|whispering|serious"
+      "emotion": "neutral|happy|sad|angry|surprised|fearful|skeptical|sarcastic|urgent|calm|whispering|serious",
+      "pace": "slow|normal|fast",
+      "energy": "low|medium|high|whisper",
+      "pitch_tendency": "flat|rising|falling|rising_falling|variable",
+      "pauses": [{{"after_word_index": 2, "duration_ms": 180}}],
+      "emphasized_words": ["translated word to stress"],
+      "intonation_contour": "short description of the pitch movement",
+      "delivery_instruction": "one concise instruction for a dubbing actor"
     }}
   ]
 }}
@@ -352,6 +886,9 @@ Requirements:
 - Translate for natural professional dubbing, not word-for-word.
 - Keep translated speech short enough to fit the original time window.
 - Preserve intent, politeness, humor and emotion.
+- Analyze prosody for EACH segment, not only for the speaker: pace, energy, pitch movement, pauses longer than 150 ms, and emphasis.
+- emphasized_words must contain words from the translated dialogue, not the original language.
+- delivery_instruction must be one or two concise sentences describing how to perform this translated line naturally.
 - Never infer identity or actual gender; voice_character only describes audible vocal presentation for voice casting.
 - Return JSON only. If there is no speech, return {{"speakers":[],"segments":[]}}."""
 
@@ -627,12 +1164,15 @@ async def translate(request: Request) -> dict[str, Any]:
         segment["speaker_id"] = id_map[old_id]
         segment["start"] = max(0.0, float(segment.get("start", 0)))
         segment["end"] = max(segment["start"] + 0.2, float(segment.get("end", segment["start"] + 2)))
+        normalize_segment_prosody(segment)
         if max_extra_letters is not None:
             original_letters = letter_count(segment.get("original"))
             segment["original_letters"] = original_letters
             segment["translated_letters"] = letter_count(segment.get("translated"))
             segment["max_translated_letters"] = original_letters + max_extra_letters
 
+    segments.sort(key=lambda item: (float(item.get("start", 0)), float(item.get("end", 0))))
+    alignment = apply_hybrid_alignment(source, segments)
     speakers = assign_speaker_voices(speakers)
     return {
         "ok": True,
@@ -641,6 +1181,7 @@ async def translate(request: Request) -> dict[str, Any]:
         "segments": segments,
         "lengthAdjusted": length_adjusted,
         "maxExtraLetters": max_extra_letters,
+        "alignment": alignment,
     }
 
 
@@ -708,15 +1249,30 @@ async def synthesize(
     emotion: str,
     delivery: str,
     target_duration: float,
+    pace: str = "normal",
+    energy: str = "medium",
+    pitch_tendency: str = "variable",
+    intonation_contour: str = "natural",
+    emphasized_words: list[str] | None = None,
+    pauses: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     voice = voice if voice in VOICES else "Kore"
     target_duration = max(0.4, min(float(target_duration or 3), 30.0))
+    emphasis = ", ".join((emphasized_words or [])[:8]) or "none"
+    pause_directions = "; ".join(
+        f"after translated word {int(item.get('after_word_index', 0)) + 1}, make a {int(item.get('duration_ms', 150))} ms pause"
+        for item in (pauses or [])[:6]
+        if isinstance(item, dict)
+    ) or "no special internal pauses"
     prompt = (
-        "Perform the following translated line like a professional film dubbing actor. "
-        f"Voice direction: {delivery or 'natural'}, emotion: {emotion or 'neutral'}. "
+        "Perform the translated dialogue like a professional film dubbing actor. "
+        f"Line-specific direction: {delivery or 'natural'}. "
+        f"Emotion: {emotion or 'neutral'}; pace: {pace}; energy: {energy}; "
+        f"pitch tendency: {pitch_tendency}; intonation contour: {intonation_contour}. "
+        f"Emphasize these translated words naturally: {emphasis}. Pause plan: {pause_directions}. "
         f"Finish naturally in approximately {target_duration:.1f} seconds. "
         "Start speaking immediately with no introductory pause or leading silence. "
-        "Speak only the dialogue; do not read these instructions. Dialogue: " + text
+        "Instructions describe acting style, not words to read aloud. Speak only this dialogue: " + text
     )
     payload = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
@@ -762,12 +1318,19 @@ async def synthesize(
         source_path = UPLOADS / filename
         source_path.write_bytes(raw)
         synced_path = trim_tts_leading_silence(source_path)
+        audio_duration = probe_duration(synced_path)
+        duration_ratio = audio_duration / target_duration if target_duration > 0 and audio_duration > 0 else 1.0
+        recommended_rate = min(1.08, duration_ratio) if duration_ratio > 1.0 else 1.0
         return {
             "ok": True,
             "url": f"/uploads/{synced_path.name}",
             "filename": synced_path.name,
             "voice": voice,
             "leadingSilenceTrimmed": synced_path != source_path,
+            "audioDuration": round(audio_duration, 3),
+            "targetDuration": round(target_duration, 3),
+            "recommendedRate": round(recommended_rate, 4),
+            "durationWarning": "too_long" if duration_ratio > 1.08 else None,
         }
     except Exception as exc:
         return {"ok": False, "error": {"code": "BAD_TTS_RESPONSE", "message": str(exc), "help": []}}
@@ -792,8 +1355,14 @@ async def voice(request: Request) -> dict[str, Any]:
                 text=text,
                 voice=str(segment.get("voice") or "Kore"),
                 emotion=str(segment.get("emotion") or "neutral"),
-                delivery=str(segment.get("delivery") or "natural"),
+                delivery=str(segment.get("delivery_instruction") or segment.get("delivery") or "natural"),
                 target_duration=float(segment.get("duration") or 3),
+                pace=str(segment.get("pace") or "normal"),
+                energy=str(segment.get("energy") or "medium"),
+                pitch_tendency=str(segment.get("pitch_tendency") or "variable"),
+                intonation_contour=str(segment.get("intonation_contour") or "natural"),
+                emphasized_words=segment.get("emphasized_words") if isinstance(segment.get("emphasized_words"), list) else [],
+                pauses=segment.get("pauses") if isinstance(segment.get("pauses"), list) else [],
             )
             result["id"] = segment.get("id")
             output.append(result)
@@ -858,23 +1427,31 @@ async def export(request: Request) -> dict[str, Any]:
     video_duration = probe_duration(video)
     if video_duration <= 0:
         return {"ok": False, "error": "ffprobe не смог определить длительность видео. Проверьте установку ffmpeg/ffprobe и формат файла."}
+    dubbed_specs: list[tuple[int, float, float, float]] = []
+    output_duration = video_duration
+    for input_index, (segment, audio) in enumerate(valid_segments, start=1):
+        start = max(0.0, float(segment.get("start", 0)))
+        requested_target = max(0.2, float(segment.get("end", start + 2)) - start)
+        source_duration = probe_duration(audio)
+        speed = min(1.08, max(1.0, source_duration / requested_target)) if source_duration > 0 else 1.0
+        # Never slow short clips or accelerate long clips by more than 8%. If a
+        # generated line is still long, let it finish naturally instead of clipping it.
+        target = max(requested_target, source_duration / speed) if source_duration > 0 else requested_target
+        output_duration = max(output_duration, start + target)
+        dubbed_specs.append((input_index, start, target, speed))
+
     filters: list[str] = []
-    safe_video_duration = video_duration
     if has_audio_stream(video):
         filters.append(
-            f"[0:a]volume={original_volume},apad,atrim=duration={safe_video_duration:.3f}[original]"
+            f"[0:a]volume={original_volume},apad,atrim=duration={output_duration:.3f}[original]"
         )
     else:
         filters.append(
-            f"anullsrc=r=48000:cl=stereo,atrim=duration={safe_video_duration:.3f}[original]"
+            f"anullsrc=r=48000:cl=stereo,atrim=duration={output_duration:.3f}[original]"
         )
 
     dubbed_labels = []
-    for input_index, (segment, audio) in enumerate(valid_segments, start=1):
-        start = max(0.0, float(segment.get("start", 0)))
-        target = max(0.25, float(segment.get("end", start + 2)) - start)
-        source_duration = probe_duration(audio)
-        speed = source_duration / target if source_duration > 0 else 1.0
+    for input_index, start, target, speed in dubbed_specs:
         label = f"dub{input_index}"
         filters.append(
             f"[{input_index}:a]{atempo_chain(speed)},atrim=duration={target:.3f},"
@@ -884,14 +1461,22 @@ async def export(request: Request) -> dict[str, Any]:
 
     filters.append(
         f"[original]{''.join(dubbed_labels)}amix=inputs={len(dubbed_labels) + 1}:"
-        f"duration=longest:normalize=0:dropout_transition=0,atrim=duration={safe_video_duration:.3f}[final]"
+        f"duration=longest:normalize=0:dropout_transition=0,atrim=duration={output_duration:.3f}[final]"
     )
+
+    tail_extension = max(0.0, output_duration - video_duration)
+    video_options = ["-c:v", "copy"]
+    if tail_extension > 0.01:
+        video_options = [
+            "-vf", f"tpad=stop_mode=clone:stop_duration={tail_extension:.3f}",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+        ]
 
     output = EXPORTS / f"dub_{uuid.uuid4().hex[:8]}.mp4"
     command = [
         "ffmpeg", "-y", *inputs, "-filter_complex", ";".join(filters),
-        "-map", "0:v:0", "-map", "[final]", "-c:v", "copy", "-c:a", "aac",
-        "-b:a", "192k", "-movflags", "+faststart", "-t", f"{safe_video_duration:.3f}", str(output),
+        "-map", "0:v:0", "-map", "[final]", *video_options, "-c:a", "aac",
+        "-b:a", "192k", "-movflags", "+faststart", "-t", f"{output_duration:.3f}", str(output),
     ]
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=1200)
@@ -917,5 +1502,9 @@ if __name__ == "__main__":
     if config["mode"] == "standard":
         print(f"Проект/регион: {config['project']} / {config['location']}")
     print(f"Распознавание: {TRANSCRIBE_MODEL}")
-    print(f"Озвучка: {TTS_MODEL}\n")
+    print(f"Озвучка: {TTS_MODEL}")
+    alignment_status = config["alignmentMode"] if config["alignmentAvailable"] else "недоступна (установите faster-whisper)"
+    if config["alignmentAvailable"] and config["alignmentMode"] in {"hybrid", "precise"}:
+        alignment_status += f" / Whisper {config['whisperModel']}"
+    print(f"Синхронизация: {alignment_status}\n")
     uvicorn.run(app, host="0.0.0.0", port=8000)

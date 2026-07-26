@@ -15,6 +15,8 @@ if not exist .env (
         echo VERTEX_MODE=express
         echo VERTEX_PROJECT_ID=
         echo VERTEX_LOCATION=global
+        echo ALIGNMENT_MODE=hybrid
+        echo WHISPER_MODEL=small
     )> .env
     echo   Создан файл .env для Vertex AI.
     echo   Вставьте Vertex API key в VERTEX_API_KEY и снова запустите run.bat.
@@ -35,7 +37,7 @@ if errorlevel 1 (
 )
 
 echo   Проверяю зависимости...
-python -m pip install -q fastapi uvicorn httpx python-dotenv python-multipart
+python -m pip install -q fastapi uvicorn httpx python-dotenv python-multipart faster-whisper
 if errorlevel 1 (
     echo   ОШИБКА: не удалось установить Python-зависимости.
     pause

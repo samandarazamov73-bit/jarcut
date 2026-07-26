@@ -96,7 +96,8 @@ async function checkApi(){
     const response=await fetch('/api/diagnostics',{cache:'no-store'}),d=await response.json();
     S.apiReady=!!d.ok;
     const target=d.mode==='standard'?`${d.project||'без проекта'} / ${d.location||'global'}`:'Express Mode';
-    if(d.transcribeModel&&d.ttsModel)$('model-note').textContent=`Vertex AI ${target} • ${d.transcribeModel} • TTS: ${d.ttsModel}`;
+    const alignment=d.alignmentAvailable?` • Sync: ${d.alignmentMode}${d.alignmentMode==='hybrid'||d.alignmentMode==='precise'?`/${d.whisperModel}`:''}`:' • Sync: установите faster-whisper';
+    if(d.transcribeModel&&d.ttsModel)$('model-note').textContent=`Vertex AI ${target} • ${d.transcribeModel} • TTS: ${d.ttsModel}${alignment}`;
     if(d.ok){
       $('api').className='api ok';$('api-text').textContent=`Vertex AI: ${d.mode||'готов'}`;
       banner.hidden=false;banner.className='status ok';banner.textContent=d.message||'Vertex AI готов к дубляжу';
@@ -123,9 +124,13 @@ async function upload(file){toast('info','Загрузка видео…');const
 $('dub').onclick=dub;
 async function dub(){if(!S.file)return;const runId=++S.runId;resetDubbingAudio();S.speakers=[];S.segments=[];$('dub').disabled=true;$('progress').hidden=false;$('progress-fill').style.width='12%';showStatus('work','Распознаю всех людей, перевожу и разделяю реплики…',true);
   try{const r=await fetch('/api/translate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filename:S.file,lang:$('language').value})});const d=await r.json();if(!r.ok)throw errorInfo(d);if(runId!==S.runId)return;
-    S.speakers=d.speakers||[];S.segments=(d.segments||[]).map((x,i)=>{const start=+x.start||0,end=Math.max(start+.2,+x.end||start+2);return{id:'seg'+i,start,end,sourceStart:start,sourceEnd:end,speaker_id:x.speaker_id||'S1',original:x.original||'',text:x.translated||'',emotion:x.emotion||'neutral',audio:null,url:null,state:'wait',revision:0}});
+    S.speakers=d.speakers||[];S.segments=(d.segments||[]).map((x,i)=>{const autoStart=Number.isFinite(+x.auto_start)?+x.auto_start:(+x.start||0),autoEnd=Math.max(autoStart+.2,Number.isFinite(+x.auto_end)?+x.auto_end:(+x.end||autoStart+2)),manualOffset=+x.manual_offset||0,start=autoStart+manualOffset,end=autoEnd+manualOffset;return{id:'seg'+i,start,end,autoStart,autoEnd,sourceStart:autoStart,sourceEnd:autoEnd,manualOffset,targetDuration:Math.max(.4,autoEnd-autoStart),speaker_id:x.speaker_id||'S1',original:x.original||'',text:x.translated||'',emotion:x.emotion||'neutral',pace:x.pace||'normal',energy:x.energy||'medium',pitch_tendency:x.pitch_tendency||'variable',pauses:Array.isArray(x.pauses)?x.pauses:[],emphasized_words:Array.isArray(x.emphasized_words)?x.emphasized_words:[],intonation_contour:x.intonation_contour||'natural',delivery_instruction:x.delivery_instruction||'',alignment_method:x.alignment_method||'gemini_fallback',alignment_confidence:+x.alignment_confidence||0,alignment_warning:x.alignment_warning||null,audio:null,url:null,state:'wait',revision:0}});
     if(!S.segments.length)throw{message:'В видео не найдена речь',help:[]};
-    $('progress-fill').style.width='35%';renderSpeakers();renderPhrases();$('speakers-card').hidden=false;$('phrases-card').hidden=false;const shortened=d.lengthAdjusted?`, сокращено длинных реплик: ${d.lengthAdjusted}`:'';toast('ok',`Найдено спикеров: ${S.speakers.length}, реплик: ${S.segments.length}${shortened}`);await voiceSegments(S.segments,35);$('export-card').hidden=false;
+    $('progress-fill').style.width='35%';renderSpeakers();renderPhrases();$('speakers-card').hidden=false;$('phrases-card').hidden=false;
+    const shortened=d.lengthAdjusted?`, сокращено длинных реплик: ${d.lengthAdjusted}`:'',aligned=d.alignment?`, точная привязка: ${d.alignment.whisperRefined||0} Whisper / ${d.alignment.vadRegions||0} VAD`:'';
+    const fallbackCount=S.segments.filter(x=>x.alignment_method==='gemini_fallback').length,warningCount=S.segments.filter(x=>x.alignment_warning&&x.alignment_warning!=='split_region').length;
+    const syncWarning=d.alignment?.warning?` Синхронизация: ${d.alignment.warning}`:(warningCount?` Проверить тайминг реплик: ${warningCount} (Gemini fallback: ${fallbackCount}).`:``);
+    toast(syncWarning?'info':'ok',`Найдено спикеров: ${S.speakers.length}, реплик: ${S.segments.length}${shortened}${aligned}.${syncWarning}`);await voiceSegments(S.segments,35);$('export-card').hidden=false;
   }catch(err){const info=err.message?err:errorInfo(err);showStatus('err','Дубляж не запущен: '+info.message,false,info.help||[]);toast('err',info.message||'Дубляж не запущен');}
   finally{$('dub').disabled=!S.apiReady;$('dub').textContent='Дублировать заново';setTimeout(()=>$('progress').hidden=true,1200)}}
 
@@ -140,14 +145,14 @@ function changeVoice(id,voice){
 
 function positionLimit(seg){
   const duration=Math.max(.2,seg.end-seg.start),mediaDuration=Number.isFinite(video.duration)?video.duration:S.duration;
-  return Math.max(0,mediaDuration>0?mediaDuration-duration:seg.start);
+  return Math.max(0,seg.start,mediaDuration>0?mediaDuration-duration:seg.start);
 }
 function renderPhrases(){
   $('phrase-count').textContent=`${S.segments.filter(x=>x.state==='ok').length}/${S.segments.length} готово`;
   $('phrases').innerHTML=S.segments.map(x=>{
     const sp=speaker(x.speaker_id),color=colorFor(x.speaker_id),limit=positionLimit(x);
     const moved=Math.abs(x.start-(x.sourceStart??x.start))>.001;
-    return`<div class="phrase"><span class="time" id="time-${x.id}" onclick="previewSegment('${x.id}')" title="Воспроизвести с этой позиции">${fmtExact(x.start)}</span><div><span class="speaker-badge" style="background:${color}">${esc(sp.label||sp.id)} · ${esc(sp.voice)}</span>${x.original?`<div class="original">${esc(x.original)}</div>`:''}<textarea rows="1" oninput="editText('${x.id}',this.value)">${esc(x.text)}</textarea>${x.url?`<audio controls src="${x.url}"></audio>`:''}<div class="clip-position"><label for="position-${x.id}">Положение готового голоса</label><button class="btn btn-soft nudge" onclick="shiftSegment('${x.id}',-.1)" title="На 0,1 секунды раньше">−0.1</button><input id="position-${x.id}" type="range" min="0" max="${limit.toFixed(2)}" step="0.05" value="${x.start.toFixed(2)}" oninput="moveSegment('${x.id}',this.value)" title="Перетащите голос в нужное место"><input id="position-number-${x.id}" type="number" min="0" max="${limit.toFixed(2)}" step="0.05" value="${x.start.toFixed(2)}" oninput="moveSegment('${x.id}',this.value)" onblur="moveSegment('${x.id}',this.value,true)" aria-label="Начало реплики в секундах"><button class="btn btn-soft nudge" onclick="shiftSegment('${x.id}',.1)" title="На 0,1 секунды позже">+0.1</button><button id="position-reset-${x.id}" class="btn btn-soft nudge reset-position" onclick="resetSegmentPosition('${x.id}')" title="Вернуть исходный таймкод" ${moved?'':'disabled'}>↺</button></div></div><div class="phrase-actions"><span class="state" id="state-${x.id}">${stateIcon(x.state)}</span><button class="btn btn-soft btn-small" onclick="voiceOne('${x.id}')">Озвучить</button></div></div>`
+    return`<div class="phrase"><span class="time" id="time-${x.id}" onclick="previewSegment('${x.id}')" title="${esc(`Синхронизация: ${x.alignment_method}, уверенность ${Math.round(x.alignment_confidence*100)}%${x.alignment_warning?`, ${x.alignment_warning}`:''}`)}">${fmtExact(x.start)}</span><div><span class="speaker-badge" style="background:${color}">${esc(sp.label||sp.id)} · ${esc(sp.voice)}</span>${x.original?`<div class="original">${esc(x.original)}</div>`:''}<textarea rows="1" oninput="editText('${x.id}',this.value)">${esc(x.text)}</textarea>${x.url?`<audio controls src="${x.url}"></audio>`:''}<div class="clip-position"><label for="position-${x.id}">Положение готового голоса</label><button class="btn btn-soft nudge" onclick="shiftSegment('${x.id}',-.1)" title="На 0,1 секунды раньше">−0.1</button><input id="position-${x.id}" type="range" min="0" max="${limit.toFixed(2)}" step="0.05" value="${x.start.toFixed(2)}" oninput="moveSegment('${x.id}',this.value)" title="Перетащите голос в нужное место"><input id="position-number-${x.id}" type="number" min="0" max="${limit.toFixed(2)}" step="0.05" value="${x.start.toFixed(2)}" oninput="moveSegment('${x.id}',this.value)" onblur="moveSegment('${x.id}',this.value,true)" aria-label="Начало реплики в секундах"><button class="btn btn-soft nudge" onclick="shiftSegment('${x.id}',.1)" title="На 0,1 секунды позже">+0.1</button><button id="position-reset-${x.id}" class="btn btn-soft nudge reset-position" onclick="resetSegmentPosition('${x.id}')" title="Вернуть исходный таймкод" ${moved?'':'disabled'}>↺</button></div></div><div class="phrase-actions"><span class="state" id="state-${x.id}">${stateIcon(x.state)}</span><button class="btn btn-soft btn-small" onclick="voiceOne('${x.id}')">Озвучить</button></div></div>`
   }).join('')
 }
 const stateIcon=s=>s==='ok'?'✅':s==='error'?'❌':s==='work'?'⏳':'○';
@@ -158,7 +163,7 @@ function moveSegment(id,value,commit=false){
   const number=$('position-number-'+id);
   if(!raw||!Number.isFinite(parsed)){if(commit&&number)number.value=seg.start.toFixed(2);return}
   const next=Math.round(Math.max(0,Math.min(parsed,limit))*1000)/1000,wasClamped=Math.abs(next-parsed)>.0005;
-  stopAudio(id);completedSources.delete(id);seg.start=next;seg.end=next+duration;
+  stopAudio(id);completedSources.delete(id);seg.start=next;seg.end=next+duration;seg.manualOffset=next-(seg.autoStart??seg.sourceStart??0);
   if(buffers[id]){buffers[id].start=seg.start;buffers[id].end=seg.end}
   const time=$('time-'+id),range=$('position-'+id),reset=$('position-reset-'+id);
   if(time)time.textContent=fmtExact(seg.start);if(range)range.value=seg.start.toFixed(2);if(number&&(number!==document.activeElement||commit||wasClamped))number.value=seg.start.toFixed(2);
@@ -170,30 +175,31 @@ function resetSegmentPosition(id){const seg=S.segments.find(x=>x.id===id);if(seg
 function previewSegment(id){const seg=S.segments.find(x=>x.id===id);if(seg){completedSources.delete(id);video.currentTime=seg.start;video.play()}}
 function jump(time){video.currentTime=time;video.play()}
 
-async function voiceRequest(seg){const sp=speaker(seg.speaker_id);const r=await fetch('/api/voice',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({segments:[{id:seg.id,text:seg.text,voice:sp.voice,delivery:sp.delivery,emotion:seg.emotion,duration:Math.max(.4,seg.end-seg.start)}]})});const d=await r.json();if(!r.ok)throw errorInfo(d);return d.results?.[0]||{ok:false,error:{message:'Пустой ответ'}}}
-async function voiceSegments(segments,base=0){const todo=segments.filter(x=>x.text.trim()&&x.state!=='ok');let done=0,failed=0;showStatus('work',`Озвучиваю ${todo.length} реплик разными голосами…`,true);
+async function voiceRequest(seg){const sp=speaker(seg.speaker_id);const r=await fetch('/api/voice',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({segments:[{id:seg.id,text:seg.text,original:seg.original,voice:sp.voice,delivery:sp.delivery,delivery_instruction:seg.delivery_instruction,emotion:seg.emotion,pace:seg.pace,energy:seg.energy,pitch_tendency:seg.pitch_tendency,pauses:seg.pauses,emphasized_words:seg.emphasized_words,intonation_contour:seg.intonation_contour,duration:Math.max(.4,seg.targetDuration||seg.autoEnd-seg.autoStart||seg.end-seg.start)}]})});const d=await r.json();if(!r.ok)throw errorInfo(d);return d.results?.[0]||{ok:false,error:{message:'Пустой ответ'}}}
+async function voiceSegments(segments,base=0){const todo=segments.filter(x=>x.text.trim()&&x.state!=='ok'),exportButton=$('export');let done=0,failed=0;exportButton.disabled=true;showStatus('work',`Озвучиваю ${todo.length} реплик разными голосами…`,true);
   for(const seg of todo){
     const revision=seg.revision||0,runId=S.runId,voiceAtStart=speaker(seg.speaker_id).voice;
     seg.state='work';paint(seg);
     try{
       const res=await voiceRequest(seg);
       if(runId!==S.runId||revision!==(seg.revision||0)||voiceAtStart!==speaker(seg.speaker_id).voice){done++;continue;}
-      if(res.ok){seg.audio=res.filename;seg.url=res.url;seg.state='ok';loadBuffer(seg)}else{seg.state='error';seg.error=errorInfo(res.error);failed++}
+      if(res.ok){seg.audio=res.filename;seg.url=res.url;seg.audioDuration=+res.audioDuration||0;seg.recommendedRate=+res.recommendedRate||1;seg.durationWarning=res.durationWarning||null;if(seg.audioDuration>0)seg.end=seg.start+Math.max(.2,seg.audioDuration/Math.min(1.08,Math.max(1,seg.recommendedRate)));seg.state='ok';await loadBuffer(seg)}else{seg.state='error';seg.error=errorInfo(res.error);failed++}
     }catch(e){if(runId===S.runId&&revision===(seg.revision||0)){seg.state='error';seg.error=e.message?e:errorInfo(e);failed++}}
     done++;paint(seg);$('progress-fill').style.width=(base+(100-base)*done/Math.max(1,todo.length))+'%'
   }
-  renderPhrases();showStatus(failed===todo.length?'err':'ok',failed?`Готово ${done-failed}/${done}. Ошибок: ${failed}`:`Дубляж готов: ${done} реплик`,false);return failed===0}
+  renderPhrases();exportButton.disabled=false;showStatus(failed===todo.length?'err':'ok',failed?`Готово ${done-failed}/${done}. Ошибок: ${failed}`:`Дубляж готов: ${done} реплик`,false);return failed===0}
 function paint(seg){const el=$('state-'+seg.id);if(el)el.textContent=stateIcon(seg.state);$('phrase-count').textContent=`${S.segments.filter(x=>x.state==='ok').length}/${S.segments.length} готово`}
 async function voiceOne(id){
   const seg=S.segments.find(x=>x.id===id);if(!seg)return;
-  const revision=seg.revision||0,runId=S.runId,voiceAtStart=speaker(seg.speaker_id).voice;
-  seg.state='work';paint(seg);
+  const revision=seg.revision||0,runId=S.runId,voiceAtStart=speaker(seg.speaker_id).voice,exportButton=$('export');
+  exportButton.disabled=true;seg.state='work';paint(seg);
   try{
     const res=await voiceRequest(seg);
-    if(runId!==S.runId||revision!==(seg.revision||0)||voiceAtStart!==speaker(seg.speaker_id).voice)return;
-    if(res.ok){seg.audio=res.filename;seg.url=res.url;seg.state='ok';loadBuffer(seg);renderPhrases()}
+    if(runId!==S.runId||revision!==(seg.revision||0)||voiceAtStart!==speaker(seg.speaker_id).voice){exportButton.disabled=false;return;}
+    if(res.ok){seg.audio=res.filename;seg.url=res.url;seg.audioDuration=+res.audioDuration||0;seg.recommendedRate=+res.recommendedRate||1;seg.durationWarning=res.durationWarning||null;if(seg.audioDuration>0)seg.end=seg.start+Math.max(.2,seg.audioDuration/Math.min(1.08,Math.max(1,seg.recommendedRate)));seg.state='ok';await loadBuffer(seg);renderPhrases()}
     else{seg.state='error';paint(seg);toast('err',errorInfo(res.error).message)}
   }catch(e){if(runId===S.runId&&revision===(seg.revision||0)){seg.state='error';paint(seg);toast('err',e.message||'Ошибка озвучки')}}
+  exportButton.disabled=false;
 }
 $('retry').onclick=async()=>{const pending=S.segments.filter(x=>x.state!=='ok');if(!pending.length)return toast('info','Все реплики уже готовы');$('progress').hidden=false;$('progress-fill').style.width='0';await voiceSegments(pending,0)};
 
@@ -203,7 +209,10 @@ async function loadBuffer(seg){
   try{
     const ctx=audioContext(),data=await(await fetch(url)).arrayBuffer(),buffer=await ctx.decodeAudioData(data);
     if(runId!==S.runId||revision!==(seg.revision||0)||url!==seg.url)return;
-    const target=Math.max(.25,seg.end-seg.start),rate=Math.max(.05,Math.min(buffer.duration/target,20));
+    const target=Math.max(.4,seg.targetDuration||seg.autoEnd-seg.autoStart||seg.end-seg.start);
+    const rate=buffer.duration>target?Math.min(1.08,buffer.duration/target):1;
+    const effectiveDuration=Math.max(.2,buffer.duration/rate);
+    seg.end=seg.start+effectiveDuration;
     completedSources.delete(seg.id);buffers[seg.id]={buffer,start:seg.start,end:seg.end,rate};
   }catch(e){console.warn(e)}
 }
@@ -226,8 +235,8 @@ function resumeSyncIfReady(){
 }
 video.addEventListener('play',()=>{S.playing=true;audioContext();startSyncLoop()});
 video.addEventListener('playing',resumeSyncIfReady);
-video.addEventListener('pause',()=>{S.playing=false;stopSyncLoop()});
-video.addEventListener('ended',()=>{S.playing=false;completedSources.clear();stopSyncLoop()});
+video.addEventListener('pause',()=>{S.playing=false;if(video.ended||(Number.isFinite(video.duration)&&video.duration-video.currentTime<.05)){if(syncFrame)cancelAnimationFrame(syncFrame);syncFrame=0}else stopSyncLoop()});
+video.addEventListener('ended',()=>{S.playing=false;if(syncFrame)cancelAnimationFrame(syncFrame);syncFrame=0});
 video.addEventListener('waiting',()=>{syncBuffering=true;stopAll()});
 video.addEventListener('stalled',()=>{if(video.readyState<3){syncBuffering=true;stopAll()}});
 video.addEventListener('canplay',resumeSyncIfReady);

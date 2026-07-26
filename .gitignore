@@ -1,6 +1,7 @@
 .env
 __pycache__/
 semantic-review/
+.models/
 uploads/*
 exports/*
 !uploads/.gitkeep
