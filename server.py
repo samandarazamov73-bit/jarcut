@@ -1049,6 +1049,7 @@ def _normalize_words(text: str) -> list[str]:
 
 
 WHISPER_MAX_WINDOW_SECONDS = 12.0
+WHISPER_FULL_PASS_MAX_SECONDS = 90.0
 
 
 def merge_alignment_windows(segments: list[dict[str, Any]], precise_all: bool = False) -> list[dict[str, Any]]:
@@ -1188,9 +1189,53 @@ def run_whisper_for_windows(
                             "start": absolute_start,
                             "end": absolute_end,
                             "probability": float(word.probability or 0),
+                            "segment_avg_logprob": float(getattr(item, "avg_logprob", 0) or 0),
+                            "segment_no_speech_prob": float(
+                                getattr(item, "no_speech_prob", 0) or 0
+                            ),
                             "window_id": window_id,
                         })
     words.sort(key=lambda item: (item["start"], item["end"], item["window_id"]))
+    for index, word in enumerate(words):
+        word["index"] = index
+    return words
+
+
+def run_whisper_full_audio(
+    source: Path,
+    audio: Any | None = None,
+    sampling_rate: int = 16000,
+) -> list[dict[str, Any]]:
+    """Transcribe a short source exactly once and expose absolute word timing."""
+    model = _get_whisper_model()
+    if audio is None:
+        from faster_whisper.audio import decode_audio
+
+        audio = decode_audio(str(source), sampling_rate=sampling_rate)
+    transcription, _ = model.transcribe(
+        audio,
+        word_timestamps=True,
+        beam_size=5,
+        condition_on_previous_text=False,
+        vad_filter=False,
+    )
+    words: list[dict[str, Any]] = []
+    for item in transcription:
+        avg_logprob = float(getattr(item, "avg_logprob", 0) or 0)
+        no_speech_prob = float(getattr(item, "no_speech_prob", 0) or 0)
+        for word in item.words or []:
+            normalized = _normalize_words(word.word)
+            for token in normalized:
+                words.append({
+                    "word": token,
+                    "start": float(word.start),
+                    "end": float(word.end),
+                    "probability": float(word.probability or 0),
+                    "segment_avg_logprob": avg_logprob,
+                    "segment_no_speech_prob": no_speech_prob,
+                    "window_id": 0,
+                })
+    words.sort(key=lambda item: (item["start"], item["end"]))
     for index, word in enumerate(words):
         word["index"] = index
     return words
@@ -1252,8 +1297,17 @@ def _word_span_candidates(
                 None, target_text, " ".join(word["word"] for word in chosen_words)
             ).ratio()
             proximity = max(0.0, 1.0 - abs(chosen_words[0]["start"] - expected_start) / 1.5)
-            probability = sum(word["probability"] for word in chosen_words) / len(chosen_words)
-            score = 0.70 * similarity + 0.15 * proximity + 0.15 * probability
+            probabilities = [float(word.get("probability", 0)) for word in chosen_words]
+            mean_probability = sum(probabilities) / len(probabilities)
+            min_probability = min(probabilities)
+            no_speech_prob = max(
+                float(word.get("segment_no_speech_prob", 0) or 0)
+                for word in chosen_words
+            )
+            span_confidence = 0.6 * mean_probability + 0.4 * min_probability
+            if no_speech_prob > 0.5:
+                span_confidence *= max(0.0, 1.0 - no_speech_prob)
+            score = 0.70 * similarity + 0.15 * proximity + 0.15 * span_confidence
             first_token_similarity = difflib.SequenceMatcher(
                 None, target[0], chosen_words[0]["word"]
             ).ratio()
@@ -1265,7 +1319,10 @@ def _word_span_candidates(
                 "text_similarity": similarity,
                 "first_token_similarity": first_token_similarity,
                 "last_token_similarity": last_token_similarity,
-                "probability": probability,
+                "probability": span_confidence,
+                "mean_probability": mean_probability,
+                "min_probability": min_probability,
+                "no_speech_probability": no_speech_prob,
                 "length_ratio": min(len(target), len(chosen_words)) / max(len(target), len(chosen_words)),
                 "start": float(chosen_words[0]["start"]),
                 "end": float(chosen_words[-1]["end"]),
@@ -1834,6 +1891,145 @@ def refine_speaker_transitions(
     return refined
 
 
+FORCED_ALIGNMENT_STRICT_GATE_SECONDS = 2.0
+FORCED_ALIGNMENT_EXPANDED_GATE_SECONDS = 3.0
+FORCED_ALIGNMENT_MIN_TEXT_SIMILARITY = 0.72
+FORCED_ALIGNMENT_MIN_WORD_CONFIDENCE = 0.42
+
+
+def _local_forced_alignment_candidates(
+    segment: dict[str, Any], words: list[dict[str, Any]], gate_seconds: float
+) -> list[dict[str, Any]]:
+    """Build hard-filtered candidates close to one Gemini timing prior."""
+    gemini_start = float(segment["gemini_start"])
+    gemini_end = float(segment["gemini_end"])
+    region_start = gemini_start - gate_seconds
+    region_end = gemini_end + gate_seconds
+    unique: dict[tuple[int, int], dict[str, Any]] = {}
+    for match in _word_span_candidates(
+        segment,
+        words,
+        region_start=region_start,
+        region_end=region_end,
+        use_gemini_window=False,
+    ):
+        if (
+            float(match["start"]) < region_start
+            or float(match["end"]) > region_end
+            or float(match["text_similarity"]) < FORCED_ALIGNMENT_MIN_TEXT_SIMILARITY
+            or float(match["probability"]) < FORCED_ALIGNMENT_MIN_WORD_CONFIDENCE
+            or float(match["length_ratio"]) < 0.70
+            or float(match["first_token_similarity"]) < 0.50
+            or float(match["last_token_similarity"]) < 0.50
+        ):
+            continue
+        distance = abs(float(match["start"]) - gemini_start)
+        locality = max(0.0, 1.0 - distance / gate_seconds)
+        # Speaker changes are intentionally absent from this text/timing score.
+        utility = (
+            0.75 * float(match["text_similarity"])
+            + 0.15 * float(match["probability"])
+            + 0.10 * locality
+        )
+        candidate = dict(match)
+        candidate["forced_utility"] = utility
+        candidate["temporal_gate"] = gate_seconds
+        key = (int(match["start_index"]), int(match["end_index"]))
+        if key not in unique or utility > float(unique[key]["forced_utility"]):
+            unique[key] = candidate
+    return sorted(
+        unique.values(),
+        key=lambda item: (int(item["start_index"]), int(item["end_index"])),
+    )
+
+
+def _select_global_forced_alignment_spans(
+    segments: list[dict[str, Any]], words: list[dict[str, Any]]
+) -> list[dict[str, Any] | None]:
+    """Globally choose ordered spans, allowing local rejection and skipped words."""
+    candidate_lists: list[list[dict[str, Any]]] = []
+    for segment in segments:
+        candidates = _local_forced_alignment_candidates(
+            segment, words, FORCED_ALIGNMENT_STRICT_GATE_SECONDS
+        )
+        if not candidates:
+            candidates = _local_forced_alignment_candidates(
+                segment, words, FORCED_ALIGNMENT_EXPANDED_GATE_SECONDS
+            )
+        candidate_lists.append(candidates)
+
+    # State keys contain only the last consumed word. Rejecting a bad line keeps
+    # that key unchanged, so one failure cannot block a valid phrase in the tail.
+    states: dict[int, tuple[list[dict[str, Any] | None], tuple[float, int]]] = {
+        -1: ([], (0.0, 0))
+    }
+    for candidates in candidate_lists:
+        next_states: dict[
+            int, tuple[list[dict[str, Any] | None], tuple[float, int]]
+        ] = {}
+        for last_end, (chosen, objective) in states.items():
+            options: list[dict[str, Any] | None] = [None, *candidates]
+            for match in options:
+                if match is not None and int(match["start_index"]) <= last_end:
+                    continue
+                new_end = last_end if match is None else int(match["end_index"])
+                if match is None:
+                    new_objective = (objective[0] - 0.20, objective[1])
+                else:
+                    new_objective = (
+                        objective[0] + float(match["forced_utility"]),
+                        objective[1] + 1,
+                    )
+                candidate_state = ([*chosen, match], new_objective)
+                existing = next_states.get(new_end)
+                if existing is None or candidate_state[1] > existing[1]:
+                    next_states[new_end] = candidate_state
+        states = next_states
+    if not states:
+        return [None] * len(segments)
+    return max(states.values(), key=lambda item: item[1])[0]
+
+
+def refine_segments_with_full_whisper(
+    segments: list[dict[str, Any]], words: list[dict[str, Any]]
+) -> int:
+    """Forced-align every ordinary turn while preserving overlap handling."""
+    candidates = sorted(
+        (
+            segment
+            for segment in segments
+            if not segment.get("is_overlap")
+            and not segment.get("shared_vad_cross_speaker")
+            and not segment.get("gemini_overlap_candidate")
+        ),
+        key=lambda item: (float(item["gemini_start"]), float(item["gemini_end"])),
+    )
+    selected = _select_global_forced_alignment_spans(candidates, words)
+    refined = 0
+    for segment, match in zip(candidates, selected):
+        if match is None:
+            segment["forced_alignment_rejected"] = True
+            continue
+        start = float(match["start"])
+        end = float(match["end"])
+        confidence = min(0.95, float(match["forced_utility"]))
+        segment.update({
+            "auto_start": round(max(0.0, start), 3),
+            "auto_end": round(max(start + 0.2, end), 3),
+            "alignment_method": "whisper_forced_alignment",
+            "alignment_confidence": round(confidence, 3),
+            "alignment_warning": (
+                None if confidence >= 0.70 else "whisper_low_text_match"
+            ),
+            "forced_alignment_rejected": False,
+            "whisper_word_start_index": int(match["start_index"]),
+            "whisper_word_end_index": int(match["end_index"]),
+            "whisper_temporal_gate": float(match["temporal_gate"]),
+        })
+        refined += 1
+    return refined
+
+
 def refine_segments_with_whisper(
     segments: list[dict[str, Any]], words: list[dict[str, Any]], precise_all: bool = False
 ) -> int:
@@ -1907,6 +2103,7 @@ def apply_hybrid_alignment(source: Path, segments: list[dict[str, Any]]) -> dict
             "speakerTransitionsRefined": 0,
             "speakerTransitionsVerified": 0,
             "speakerVerificationWarning": None,
+            "whisperStrategy": "none",
             "warning": None,
         }
 
@@ -1918,21 +2115,38 @@ def apply_hybrid_alignment(source: Path, segments: list[dict[str, Any]]) -> dict
     transition_refined = 0
     speaker_verified = 0
     speaker_warning: str | None = None
+    whisper_strategy = "none"
     if mode in {"hybrid", "precise"} and importlib.util.find_spec("faster_whisper") is not None:
-        windows = merge_alignment_windows(segments, precise_all=mode == "precise")
-        if windows:
-            try:
-                words = run_whisper_for_windows(source, windows, audio=audio)
+        audio_duration = (
+            len(audio) / 16000 if audio is not None else probe_duration(source)
+        )
+        use_full_pass = 0 < audio_duration <= WHISPER_FULL_PASS_MAX_SECONDS
+        try:
+            if use_full_pass:
+                whisper_strategy = "full"
+                words = run_whisper_full_audio(source, audio=audio)
                 transition_refined = refine_speaker_transitions(segments, words)
-                generic_refined = refine_segments_with_whisper(
-                    segments, words, precise_all=mode == "precise"
+                generic_refined = refine_segments_with_full_whisper(segments, words)
+            else:
+                windows = merge_alignment_windows(
+                    segments, precise_all=mode == "precise"
                 )
-                whisper_refined = transition_refined + generic_refined
-                speaker_verified, speaker_warning = verify_speaker_transitions_with_embeddings(
-                    audio, segments
-                )
-            except Exception as exc:
-                warning = f"Precise fallback недоступен: {exc}"
+                if not windows:
+                    words = []
+                    generic_refined = 0
+                else:
+                    whisper_strategy = "windows"
+                    words = run_whisper_for_windows(source, windows, audio=audio)
+                    transition_refined = refine_speaker_transitions(segments, words)
+                    generic_refined = refine_segments_with_whisper(
+                        segments, words, precise_all=mode == "precise"
+                    )
+            whisper_refined = transition_refined + generic_refined
+            speaker_verified, speaker_warning = verify_speaker_transitions_with_embeddings(
+                audio, segments
+            )
+        except Exception as exc:
+            warning = f"Precise fallback недоступен: {exc}"
 
     if speaker_warning:
         warning = f"{warning}; {speaker_warning}" if warning else speaker_warning
@@ -1950,6 +2164,7 @@ def apply_hybrid_alignment(source: Path, segments: list[dict[str, Any]]) -> dict
         "speakerTransitionsRefined": transition_refined,
         "speakerTransitionsVerified": speaker_verified,
         "speakerVerificationWarning": speaker_warning,
+        "whisperStrategy": whisper_strategy,
         "warning": warning,
     }
 
@@ -2510,7 +2725,7 @@ async def synthesize(
     pauses: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     voice = voice if voice in VOICES else "Kore"
-    target_duration = max(0.4, min(float(target_duration or 3), 30.0))
+    target_duration = max(0.2, min(float(target_duration or 3), 30.0))
     prompt = build_tts_prompt(
         text=text,
         language_code=language_code,
@@ -2586,6 +2801,171 @@ async def synthesize(
         return {"ok": False, "error": {"code": "BAD_TTS_RESPONSE", "message": str(exc), "help": []}}
 
 
+TTS_MAX_REGENERATION_ATTEMPTS = 2
+TTS_MAX_PLAYBACK_RATE = 1.08
+TTS_OVERRUN_TOLERANCE_SECONDS = 0.06
+
+
+async def shorten_translation_for_duration(
+    client: httpx.AsyncClient,
+    current_text: str,
+    original_text: str,
+    language_code: str,
+    target_duration: float,
+    actual_duration: float,
+    attempt: int,
+) -> str | None:
+    """Request one meaning-preserving, duration-aware rewrite of a TTS line."""
+    target_language = LANGS.get(language_code, LANGS["en"])
+    ratio = max(0.25, min(0.95, target_duration / max(actual_duration, 0.1)))
+    target_letters = max(1, math.floor(letter_count(current_text) * ratio * 0.92))
+    prompt = f"""You are a professional dubbing editor for {target_language}.
+The current translated line is too long for its fixed audio slot.
+Rewrite it as concise, natural spoken {target_language}, preserving the complete intent, emotion, politeness, names, and essential facts.
+Do not add explanations. Do not split the line. Do not change language.
+The actor must finish naturally within {target_duration:.2f} seconds.
+The previous TTS lasted {actual_duration:.2f} seconds.
+Aim for no more than {target_letters} alphabetic letters; this is a supporting limit, while spoken duration is the primary goal.
+This is shortening attempt {attempt} of {TTS_MAX_REGENERATION_ATTEMPTS}.
+
+Original speech:
+{original_text}
+
+Current translation:
+{current_text}
+
+Return JSON only: {{"translated":"short natural line"}}"""
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0.1,
+            "responseMimeType": "application/json",
+        },
+    }
+    try:
+        response = await client.post(
+            vertex_model_url(TRANSCRIBE_MODEL),
+            headers=vertex_headers(),
+            json=payload,
+        )
+        if response.status_code != 200:
+            return None
+        text = response.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        if text.startswith("```"):
+            text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+        parsed = json.loads(text)
+        candidate = str(parsed.get("translated") or "").strip()
+    except (httpx.RequestError, KeyError, IndexError, TypeError, ValueError):
+        return None
+    if not candidate or candidate == current_text:
+        return None
+    if letter_count(candidate) >= letter_count(current_text):
+        return None
+    return candidate
+
+
+def discard_generated_voice(result: dict[str, Any]) -> None:
+    """Delete a superseded generated clip without touching user uploads."""
+    filename = Path(str(result.get("filename") or "")).name
+    if filename.startswith("voice_"):
+        (UPLOADS / filename).unlink(missing_ok=True)
+
+
+async def synthesize_segment_with_duration_retry(
+    client: httpx.AsyncClient,
+    segment: dict[str, Any],
+    language_code: str,
+) -> dict[str, Any]:
+    """Synthesize, shorten, and retry before allowing an emergency tail trim."""
+    current_text = str(segment.get("text") or "").strip()
+    original_text = str(segment.get("original") or "").strip()
+    deadline = max(0.2, min(float(segment.get("duration") or 3), 30.0))
+    shortening_attempts = 0
+    generated_attempts = 0
+    result: dict[str, Any] = {"ok": False, "error": {"message": "TTS не запущен"}}
+    retained_result: dict[str, Any] | None = None
+
+    while generated_attempts <= TTS_MAX_REGENERATION_ATTEMPTS:
+        generated_attempts += 1
+        candidate_result = await synthesize(
+            client=client,
+            text=current_text,
+            voice=str(segment.get("voice") or "Kore"),
+            emotion=str(segment.get("emotion") or "neutral"),
+            delivery=str(segment.get("delivery_instruction") or segment.get("delivery") or "natural"),
+            target_duration=deadline,
+            language_code=language_code,
+            pace=str(segment.get("pace") or "normal"),
+            energy=str(segment.get("energy") or "medium"),
+            pitch_tendency=str(segment.get("pitch_tendency") or "variable"),
+            intonation_contour=str(segment.get("intonation_contour") or "natural"),
+            emphasized_words=(
+                segment.get("emphasized_words")
+                if isinstance(segment.get("emphasized_words"), list)
+                else []
+            ),
+            pauses=segment.get("pauses") if isinstance(segment.get("pauses"), list) else [],
+        )
+        if not candidate_result.get("ok"):
+            if retained_result is None:
+                result = candidate_result
+            else:
+                result = retained_result
+                result.update({
+                    "ttsAttempts": generated_attempts,
+                    "emergencyTrim": True,
+                    "durationWarning": "emergency_trim",
+                    "regenerationFallback": True,
+                    "regenerationError": candidate_result.get("error"),
+                })
+            break
+
+        # Keep the previous usable clip until its replacement has succeeded.
+        # Only then is the superseded file safe to remove.
+        if retained_result is not None:
+            discard_generated_voice(retained_result)
+        result = candidate_result
+        retained_result = result
+
+        audio_duration = max(0.0, float(result.get("audioDuration") or 0))
+        required_rate = audio_duration / deadline if deadline > 0 and audio_duration > 0 else 1.0
+        effective_duration = audio_duration / min(TTS_MAX_PLAYBACK_RATE, max(1.0, required_rate))
+        overrun = max(0.0, effective_duration - deadline)
+        fits = required_rate <= TTS_MAX_PLAYBACK_RATE
+        within_overrun_tolerance = (
+            0 < overrun <= TTS_OVERRUN_TOLERANCE_SECONDS
+        )
+        result.update({
+            "text": current_text,
+            "durationAdjusted": shortening_attempts > 0,
+            "ttsAttempts": generated_attempts,
+            "availableDuration": round(deadline, 3),
+            "requiredPlaybackRate": round(required_rate, 4),
+            "overrunSeconds": round(overrun, 3),
+            "withinOverrunTolerance": within_overrun_tolerance,
+            "emergencyTrim": not fits,
+            "durationWarning": None if fits else "emergency_trim",
+        })
+        if fits or shortening_attempts >= TTS_MAX_REGENERATION_ATTEMPTS:
+            break
+
+        shortened = await shorten_translation_for_duration(
+            client=client,
+            current_text=current_text,
+            original_text=original_text,
+            language_code=language_code,
+            target_duration=deadline,
+            actual_duration=audio_duration,
+            attempt=shortening_attempts + 1,
+        )
+        if not shortened:
+            break
+        current_text = shortened
+        shortening_attempts += 1
+
+    return result
+
+
 @app.post("/api/voice")
 async def voice(request: Request) -> dict[str, Any]:
     """Synthesize one or more segments, each with its speaker-specific voice."""
@@ -2597,6 +2977,7 @@ async def voice(request: Request) -> dict[str, Any]:
     # English control instructions. The browser always sends its selected language.
     requested_language_code = str(body.get("language") or "en").strip().lower()
     language_code = requested_language_code if requested_language_code in LANGS else "en"
+    allow_text_rewrite = body.get("allowTextRewrite") is True
     output = []
     async with httpx.AsyncClient(timeout=180) as client:
         for segment in body.get("segments", []):
@@ -2604,21 +2985,43 @@ async def voice(request: Request) -> dict[str, Any]:
             if not text:
                 output.append({"id": segment.get("id"), "ok": False, "error": {"message": "Пустой текст"}})
                 continue
-            result = await synthesize(
-                client=client,
-                text=text,
-                voice=str(segment.get("voice") or "Kore"),
-                emotion=str(segment.get("emotion") or "neutral"),
-                delivery=str(segment.get("delivery_instruction") or segment.get("delivery") or "natural"),
-                target_duration=float(segment.get("duration") or 3),
-                language_code=language_code,
-                pace=str(segment.get("pace") or "normal"),
-                energy=str(segment.get("energy") or "medium"),
-                pitch_tendency=str(segment.get("pitch_tendency") or "variable"),
-                intonation_contour=str(segment.get("intonation_contour") or "natural"),
-                emphasized_words=segment.get("emphasized_words") if isinstance(segment.get("emphasized_words"), list) else [],
-                pauses=segment.get("pauses") if isinstance(segment.get("pauses"), list) else [],
-            )
+            if allow_text_rewrite:
+                result = await synthesize_segment_with_duration_retry(
+                    client=client,
+                    segment=segment,
+                    language_code=language_code,
+                )
+            else:
+                # Preserve the exact-text and warning contract for older API clients.
+                result = await synthesize(
+                    client=client,
+                    text=text,
+                    voice=str(segment.get("voice") or "Kore"),
+                    emotion=str(segment.get("emotion") or "neutral"),
+                    delivery=str(
+                        segment.get("delivery_instruction")
+                        or segment.get("delivery")
+                        or "natural"
+                    ),
+                    target_duration=float(segment.get("duration") or 3),
+                    language_code=language_code,
+                    pace=str(segment.get("pace") or "normal"),
+                    energy=str(segment.get("energy") or "medium"),
+                    pitch_tendency=str(segment.get("pitch_tendency") or "variable"),
+                    intonation_contour=str(
+                        segment.get("intonation_contour") or "natural"
+                    ),
+                    emphasized_words=(
+                        segment.get("emphasized_words")
+                        if isinstance(segment.get("emphasized_words"), list)
+                        else []
+                    ),
+                    pauses=(
+                        segment.get("pauses")
+                        if isinstance(segment.get("pauses"), list)
+                        else []
+                    ),
+                )
             result["id"] = segment.get("id")
             output.append(result)
     return {"ok": True, "model": TTS_MODEL, "results": output}

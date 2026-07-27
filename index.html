@@ -201,7 +201,7 @@ function refreshPlaybackPlans(){
   }
 }
 
-async function voiceRequest(seg){const sp=speaker(seg.speaker_id);const r=await fetch('/api/voice',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({language:S.languageCode,segments:[{id:seg.id,text:seg.text,original:seg.original,voice:sp.voice,delivery:sp.delivery,delivery_instruction:seg.delivery_instruction,emotion:seg.emotion,pace:seg.pace,energy:seg.energy,pitch_tendency:seg.pitch_tendency,pauses:seg.pauses,emphasized_words:seg.emphasized_words,intonation_contour:seg.intonation_contour,duration:availableSpeechDuration(seg)}]})});const d=await r.json();if(!r.ok)throw errorInfo(d);return d.results?.[0]||{ok:false,error:{message:'Пустой ответ'}}}
+async function voiceRequest(seg){const sp=speaker(seg.speaker_id);const r=await fetch('/api/voice',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({language:S.languageCode,allowTextRewrite:true,segments:[{id:seg.id,text:seg.text,original:seg.original,voice:sp.voice,delivery:sp.delivery,delivery_instruction:seg.delivery_instruction,emotion:seg.emotion,pace:seg.pace,energy:seg.energy,pitch_tendency:seg.pitch_tendency,pauses:seg.pauses,emphasized_words:seg.emphasized_words,intonation_contour:seg.intonation_contour,duration:availableSpeechDuration(seg)}]})});const d=await r.json();if(!r.ok)throw errorInfo(d);return d.results?.[0]||{ok:false,error:{message:'Пустой ответ'}}}
 async function voiceSegments(segments,base=0){const todo=segments.filter(x=>x.text.trim()&&x.state!=='ok'),exportButton=$('export');let done=0,failed=0;exportButton.disabled=true;showStatus('work',`Озвучиваю ${todo.length} реплик разными голосами…`,true);
   for(const seg of todo){
     const revision=seg.revision||0,runId=S.runId,voiceAtStart=speaker(seg.speaker_id).voice;
@@ -209,7 +209,7 @@ async function voiceSegments(segments,base=0){const todo=segments.filter(x=>x.te
     try{
       const res=await voiceRequest(seg);
       if(runId!==S.runId||revision!==(seg.revision||0)||voiceAtStart!==speaker(seg.speaker_id).voice){done++;continue;}
-      if(res.ok){seg.audio=res.filename;seg.url=res.url;seg.audioDuration=+res.audioDuration||0;seg.recommendedRate=+res.recommendedRate||1;seg.durationWarning=res.durationWarning||null;seg.state='ok';await loadBuffer(seg)}else{seg.state='error';seg.error=errorInfo(res.error);failed++}
+      if(res.ok){seg.text=res.text||seg.text;seg.audio=res.filename;seg.url=res.url;seg.audioDuration=+res.audioDuration||0;seg.recommendedRate=+res.recommendedRate||1;seg.durationWarning=res.durationWarning||null;seg.durationAdjusted=!!res.durationAdjusted;seg.ttsAttempts=+res.ttsAttempts||1;seg.overrunSeconds=+res.overrunSeconds||0;seg.emergencyTrim=!!res.emergencyTrim;seg.state='ok';await loadBuffer(seg)}else{seg.state='error';seg.error=errorInfo(res.error);failed++}
     }catch(e){if(runId===S.runId&&revision===(seg.revision||0)){seg.state='error';seg.error=e.message?e:errorInfo(e);failed++}}
     done++;paint(seg);$('progress-fill').style.width=(base+(100-base)*done/Math.max(1,todo.length))+'%'
   }
@@ -222,7 +222,7 @@ async function voiceOne(id){
   try{
     const res=await voiceRequest(seg);
     if(runId!==S.runId||revision!==(seg.revision||0)||voiceAtStart!==speaker(seg.speaker_id).voice){exportButton.disabled=false;return;}
-    if(res.ok){seg.audio=res.filename;seg.url=res.url;seg.audioDuration=+res.audioDuration||0;seg.recommendedRate=+res.recommendedRate||1;seg.durationWarning=res.durationWarning||null;seg.state='ok';await loadBuffer(seg);renderPhrases()}
+    if(res.ok){seg.text=res.text||seg.text;seg.audio=res.filename;seg.url=res.url;seg.audioDuration=+res.audioDuration||0;seg.recommendedRate=+res.recommendedRate||1;seg.durationWarning=res.durationWarning||null;seg.durationAdjusted=!!res.durationAdjusted;seg.ttsAttempts=+res.ttsAttempts||1;seg.overrunSeconds=+res.overrunSeconds||0;seg.emergencyTrim=!!res.emergencyTrim;seg.state='ok';await loadBuffer(seg);renderPhrases()}
     else{seg.state='error';paint(seg);toast('err',errorInfo(res.error).message)}
   }catch(e){if(runId===S.runId&&revision===(seg.revision||0)){seg.state='error';paint(seg);toast('err',e.message||'Ошибка озвучки')}}
   exportButton.disabled=false;
