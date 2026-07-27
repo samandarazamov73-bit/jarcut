@@ -774,40 +774,59 @@ def _region_match_score(segment: dict[str, Any], region: dict[str, float]) -> fl
 def _assign_regions_monotonic(
     segments: list[dict[str, Any]], regions: list[dict[str, float]]
 ) -> list[int | None]:
-    """Assign ordered segments to non-decreasing VAD regions with reuse penalties."""
+    """Choose plausible local VAD matches without allowing one outlier to shift the tail."""
     if not segments or not regions:
         return [None] * len(segments)
 
-    count = len(regions)
-    previous = [
-        _region_match_score(segments[0], region) - 0.25 * index
-        for index, region in enumerate(regions)
-    ]
-    parents: list[list[int]] = []
-
-    for segment in segments[1:]:
-        current = [-math.inf] * count
-        row_parents = [0] * count
+    independent: list[int | None] = []
+    strengths: list[float] = []
+    for segment in segments:
+        candidates: list[tuple[float, int]] = []
         for region_index, region in enumerate(regions):
-            best_score, best_previous = -math.inf, 0
-            for previous_index in range(region_index + 1):
-                reuse_penalty = 1.0 if previous_index == region_index else 0.0
-                skipped_penalty = 0.25 * max(0, region_index - previous_index - 1)
-                candidate = previous[previous_index] - reuse_penalty - skipped_penalty
-                if candidate > best_score:
-                    best_score, best_previous = candidate, previous_index
-            current[region_index] = best_score + _region_match_score(segment, region)
-            row_parents[region_index] = best_previous
-        previous = current
-        parents.append(row_parents)
+            iou, start_score, _ = _match_components(segment, region)
+            # Reject impossible edges before ordering. Previously every segment
+            # was forced into the global DP and filtered only afterwards, so one
+            # bad midpoint could push all subsequent assignments forward.
+            if iou < 0.03 and start_score < 0.25:
+                continue
+            candidates.append((_region_match_score(segment, region), region_index))
+        if candidates:
+            score, region_index = max(candidates, key=lambda item: item[0])
+            independent.append(region_index)
+            strengths.append(max(0.01, score))
+        else:
+            independent.append(None)
+            strengths.append(0.0)
 
-    region_index = max(range(count), key=lambda index: previous[index])
-    assignments = [region_index]
-    for row in reversed(parents):
-        region_index = row[region_index]
-        assignments.append(region_index)
-    assignments.reverse()
-    return assignments
+    # Keep the maximum-evidence non-decreasing chain of local matches. Outliers
+    # become unmatched instead of changing assignments for every later segment.
+    valid = [index for index, assignment in enumerate(independent) if assignment is not None]
+    if not valid:
+        return independent
+    totals: dict[int, float] = {}
+    parents: dict[int, int | None] = {}
+    for position, segment_index in enumerate(valid):
+        totals[segment_index] = strengths[segment_index]
+        parents[segment_index] = None
+        assignment = int(independent[segment_index])
+        for prior_index in valid[:position]:
+            prior_assignment = int(independent[prior_index])
+            if prior_assignment > assignment:
+                continue
+            candidate_total = totals[prior_index] + strengths[segment_index]
+            if candidate_total > totals[segment_index]:
+                totals[segment_index] = candidate_total
+                parents[segment_index] = prior_index
+
+    cursor: int | None = max(valid, key=lambda index: totals[index])
+    retained: set[int] = set()
+    while cursor is not None:
+        retained.add(cursor)
+        cursor = parents[cursor]
+    return [
+        assignment if index in retained else None
+        for index, assignment in enumerate(independent)
+    ]
 
 
 def _energy_split_boundaries(
@@ -1029,6 +1048,9 @@ def _normalize_words(text: str) -> list[str]:
     ]
 
 
+WHISPER_MAX_WINDOW_SECONDS = 12.0
+
+
 def merge_alignment_windows(segments: list[dict[str, Any]], precise_all: bool = False) -> list[dict[str, Any]]:
     candidates = [
         segment for segment in segments
@@ -1053,11 +1075,32 @@ def merge_alignment_windows(segments: list[dict[str, Any]], precise_all: bool = 
         else:
             start = max(0.0, float(segment["gemini_start"]) - 0.6)
             end = float(segment["gemini_end"]) + 0.6
-        if windows and start - windows[-1]["end"] <= 1.0:
-            windows[-1]["end"] = max(windows[-1]["end"], end)
-            windows[-1]["segment_ids"].append(id(segment))
-        else:
-            windows.append({"start": start, "end": end, "segment_ids": [id(segment)]})
+
+        # Continuous dialogue previously merged transitively into one enormous
+        # clip. Keep clips non-overlapping and bounded so a repeated phrase or
+        # decoder error in the middle cannot poison words for the whole tail.
+        while end - start > 1e-6:
+            if windows and start - float(windows[-1]["end"]) <= 1.0:
+                window = windows[-1]
+                window_end = float(window["end"])
+                if end <= window_end + 1e-6:
+                    if id(segment) not in window["segment_ids"]:
+                        window["segment_ids"].append(id(segment))
+                    break
+                capacity_end = float(window["start"]) + WHISPER_MAX_WINDOW_SECONDS
+                merged_end = min(end, capacity_end)
+                if merged_end > window_end + 1e-6:
+                    window["end"] = merged_end
+                    if id(segment) not in window["segment_ids"]:
+                        window["segment_ids"].append(id(segment))
+                    start = max(start, merged_end)
+                    if start >= end - 1e-6:
+                        break
+                    continue
+                start = max(start, window_end)
+            chunk_end = min(end, start + WHISPER_MAX_WINDOW_SECONDS)
+            windows.append({"start": start, "end": chunk_end, "segment_ids": [id(segment)]})
+            start = chunk_end
     return windows
 
 
@@ -1080,34 +1123,74 @@ def _get_whisper_model() -> Any:
     return _WHISPER_INSTANCE
 
 
-def run_whisper_for_windows(source: Path, windows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def run_whisper_for_windows(
+    source: Path,
+    windows: list[dict[str, Any]],
+    audio: Any | None = None,
+    sampling_rate: int = 16000,
+) -> list[dict[str, Any]]:
     if not windows:
         return []
     model = _get_whisper_model()
-    clip_timestamps: list[float] = []
-    for window in windows:
-        clip_timestamps.extend([window["start"], window["end"]])
-    transcription, _ = model.transcribe(
-        str(source),
-        word_timestamps=True,
-        clip_timestamps=clip_timestamps,
-        beam_size=3,
-        condition_on_previous_text=False,
-        vad_filter=False,
-    )
+    if audio is None:
+        from faster_whisper.audio import decode_audio
+
+        audio = decode_audio(str(source), sampling_rate=sampling_rate)
+
     words: list[dict[str, Any]] = []
-    for item in transcription:
-        for word in item.words or []:
-            normalized = _normalize_words(word.word)
-            if normalized:
-                for token in normalized:
-                    words.append({
-                        "word": token,
-                        "start": float(word.start),
-                        "end": float(word.end),
-                        "probability": float(word.probability or 0),
-                    })
-    words.sort(key=lambda item: (item["start"], item["end"]))
+    detected_language: str | None = None
+    context_seconds = 0.5
+    audio_duration = len(audio) / sampling_rate
+    for window_id, window in enumerate(windows):
+        core_start = max(0.0, float(window["start"]))
+        core_end = min(audio_duration, float(window["end"]))
+        clip_start = max(0.0, core_start - context_seconds)
+        clip_end = min(audio_duration, core_end + context_seconds)
+        first = int(clip_start * sampling_rate)
+        last = int(clip_end * sampling_rate)
+        if last <= first:
+            continue
+        # Decode media once, then transcribe an in-memory slice. Reopening the
+        # full source for every 12-second window made long videos near-quadratic.
+        kwargs: dict[str, Any] = {
+            "word_timestamps": True,
+            "beam_size": 3,
+            "condition_on_previous_text": False,
+            "vad_filter": False,
+        }
+        if detected_language:
+            kwargs["language"] = detected_language
+        transcription, info = model.transcribe(audio[first:last], **kwargs)
+        if not detected_language:
+            language = str(getattr(info, "language", "") or "").strip()
+            detected_language = language or None
+        for item in transcription:
+            for word in item.words or []:
+                absolute_start = clip_start + float(word.start)
+                absolute_end = clip_start + float(word.end)
+                midpoint = (absolute_start + absolute_end) / 2
+                # Adjacent windows have 500 ms decoding context but disjoint
+                # ownership. Midpoint filtering prevents duplicate seam words.
+                owns_word = (
+                    midpoint >= core_start - 1e-6
+                    and (
+                        midpoint < core_end - 1e-6
+                        or window_id == len(windows) - 1
+                    )
+                )
+                if not owns_word:
+                    continue
+                normalized = _normalize_words(word.word)
+                if normalized:
+                    for token in normalized:
+                        words.append({
+                            "word": token,
+                            "start": absolute_start,
+                            "end": absolute_end,
+                            "probability": float(word.probability or 0),
+                            "window_id": window_id,
+                        })
+    words.sort(key=lambda item: (item["start"], item["end"], item["window_id"]))
     for index, word in enumerate(words):
         word["index"] = index
     return words
@@ -1601,13 +1684,14 @@ def _select_ordered_transition_spans(
             key=lambda item: (item["start_index"], item["end_index"], -item["score"]),
         ))
 
-    # State objective: match as many group segments as possible, then prefer the
-    # earliest complete ordered assignment, then the strongest aggregate score.
-    states: dict[int, tuple[list[dict[str, Any] | None], tuple[int, int, float]]] = {
-        -1: ([], (0, 0, 0.0))
+    # Match as many lines as possible, then prefer the strongest/local spans.
+    # The previous earliest-index tie-break could choose a repeated phrase near
+    # the beginning of a long group and shift every later line in that group.
+    states: dict[int, tuple[list[dict[str, Any] | None], tuple[int, float, float]]] = {
+        -1: ([], (0, 0.0, 0.0))
     }
     for candidates in candidate_lists:
-        next_states: dict[int, tuple[list[dict[str, Any] | None], tuple[int, int, float]]] = {}
+        next_states: dict[int, tuple[list[dict[str, Any] | None], tuple[int, float, float]]] = {}
         for last_end, (chosen, objective) in states.items():
             options: list[dict[str, Any] | None] = [None, *candidates]
             for match in options:
@@ -1616,9 +1700,12 @@ def _select_ordered_transition_spans(
                 new_end = last_end if match is None else int(match["end_index"])
                 new_objective = objective
                 if match is not None:
+                    expected_start = float(group[len(chosen)]["gemini_start"])
+                    distance = abs(float(match["start"]) - expected_start)
+                    locality_adjusted_score = float(match["score"]) - 0.10 * min(distance, 3.0)
                     new_objective = (
                         objective[0] + 1,
-                        objective[1] - int(match["start_index"]),
+                        objective[1] + locality_adjusted_score,
                         objective[2] + float(match["score"]),
                     )
                 candidate_state = ([*chosen, match], new_objective)
@@ -1751,7 +1838,6 @@ def refine_segments_with_whisper(
     segments: list[dict[str, Any]], words: list[dict[str, Any]], precise_all: bool = False
 ) -> int:
     refined = 0
-    consumed_until = -math.inf
     candidates = sorted(
         (
             segment for segment in segments
@@ -1765,11 +1851,30 @@ def refine_segments_with_whisper(
         ),
         key=lambda item: (float(item["gemini_start"]), float(item["gemini_end"])),
     )
+    used_word_indices: set[int] = set()
     for segment in candidates:
-        match = _best_word_sequence(segment, words, min_word_start=consumed_until)
-        if match is None or match[0] < 0.55:
+        # Reserve matched words so neighboring/repeated lines cannot reuse the
+        # same span. The reservation is safe for long videos because candidates
+        # are still hard-bounded to each segment's Gemini ±1.5 second window.
+        matches = []
+        gemini_start = float(segment["gemini_start"])
+        gemini_end = float(segment["gemini_end"])
+        for match in _word_span_candidates(segment, words):
+            indices = range(int(match["start_index"]), int(match["end_index"]) + 1)
+            if match["score"] < 0.55 or any(index in used_word_indices for index in indices):
+                continue
+            if match["start"] < gemini_start - 1.5 or match["start"] > gemini_end + 1.5:
+                continue
+            distance = abs(float(match["start"]) - gemini_start)
+            local_score = float(match["score"]) - 0.10 * min(distance, 3.0)
+            matches.append((local_score, float(match["score"]), match))
+        if not matches:
             continue
-        score, start, end = match
+        _, score, match = max(matches, key=lambda item: (item[0], item[1]))
+        start, end = float(match["start"]), float(match["end"])
+        used_word_indices.update(
+            range(int(match["start_index"]), int(match["end_index"]) + 1)
+        )
         segment.update({
             "auto_start": round(max(0.0, start), 3),
             "auto_end": round(max(start + 0.2, end), 3),
@@ -1777,7 +1882,6 @@ def refine_segments_with_whisper(
             "alignment_confidence": round(min(0.95, score), 3),
             "alignment_warning": None if score >= 0.7 else "whisper_low_text_match",
         })
-        consumed_until = end
         refined += 1
     return refined
 
@@ -1818,7 +1922,7 @@ def apply_hybrid_alignment(source: Path, segments: list[dict[str, Any]]) -> dict
         windows = merge_alignment_windows(segments, precise_all=mode == "precise")
         if windows:
             try:
-                words = run_whisper_for_windows(source, windows)
+                words = run_whisper_for_windows(source, windows, audio=audio)
                 transition_refined = refine_speaker_transitions(segments, words)
                 generic_refined = refine_segments_with_whisper(
                     segments, words, precise_all=mode == "precise"
@@ -2578,18 +2682,20 @@ async def export(request: Request) -> dict[str, Any]:
     video_duration = probe_duration(video)
     if video_duration <= 0:
         return {"ok": False, "error": "ffprobe не смог определить длительность видео. Проверьте установку ffmpeg/ffprobe и формат файла."}
-    dubbed_specs: list[tuple[int, float, float, float]] = []
+    dubbed_specs: list[tuple[int, float, float, float, bool]] = []
     output_duration = video_duration
     for input_index, (segment, audio) in enumerate(valid_segments, start=1):
         start = max(0.0, float(segment.get("start", 0)))
         requested_target = max(0.2, float(segment.get("end", start + 2)) - start)
         source_duration = probe_duration(audio)
         speed = min(1.08, max(1.0, source_duration / requested_target)) if source_duration > 0 else 1.0
-        # Never slow short clips or accelerate long clips by more than 8%. If a
-        # generated line is still long, let it finish naturally instead of clipping it.
-        target = max(requested_target, source_duration / speed) if source_duration > 0 else requested_target
+        effective_duration = source_duration / speed if source_duration > 0 else requested_target
+        trimmed = effective_duration > requested_target + 0.01
+        # Preview sends its bounded playback end. Export must honor that exact
+        # window instead of extending long clips back over later dialogue.
+        target = requested_target
         output_duration = max(output_duration, start + target)
-        dubbed_specs.append((input_index, start, target, speed))
+        dubbed_specs.append((input_index, start, target, speed, trimmed))
 
     filters: list[str] = []
     if has_audio_stream(video):
@@ -2602,11 +2708,16 @@ async def export(request: Request) -> dict[str, Any]:
         )
 
     dubbed_labels = []
-    for input_index, start, target, speed in dubbed_specs:
+    for input_index, start, target, speed, trimmed in dubbed_specs:
         label = f"dub{input_index}"
+        fade = ""
+        if trimmed:
+            fade_duration = min(0.08, target / 2)
+            fade_start = max(0.0, target - fade_duration)
+            fade = f",afade=t=out:st={fade_start:.3f}:d={fade_duration:.3f}"
         filters.append(
-            f"[{input_index}:a]{atempo_chain(speed)},atrim=duration={target:.3f},"
-            f"adelay={int(start * 1000)}|{int(start * 1000)}[{label}]"
+            f"[{input_index}:a]{atempo_chain(speed)},atrim=duration={target:.3f}"
+            f"{fade},adelay={int(start * 1000)}|{int(start * 1000)}[{label}]"
         )
         dubbed_labels.append(f"[{label}]")
 

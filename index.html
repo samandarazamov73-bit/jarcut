@@ -124,7 +124,7 @@ async function upload(file){toast('info','Загрузка видео…');const
 $('dub').onclick=dub;
 async function dub(){if(!S.file)return;const runId=++S.runId,requestedLanguage=$('language').value;S.languageCode=requestedLanguage;resetDubbingAudio();S.speakers=[];S.segments=[];$('dub').disabled=true;$('progress').hidden=false;$('progress-fill').style.width='12%';showStatus('work','Распознаю всех людей, перевожу и разделяю реплики…',true);
   try{const r=await fetch('/api/translate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filename:S.file,lang:requestedLanguage})});const d=await r.json();if(!r.ok)throw errorInfo(d);if(runId!==S.runId)return;S.languageCode=d.languageCode||requestedLanguage;
-    S.speakers=d.speakers||[];S.segments=(d.segments||[]).map((x,i)=>{const autoStart=Number.isFinite(+x.auto_start)?+x.auto_start:(+x.start||0),autoEnd=Math.max(autoStart+.2,Number.isFinite(+x.auto_end)?+x.auto_end:(+x.end||autoStart+2)),manualOffset=+x.manual_offset||0,start=autoStart+manualOffset,end=autoEnd+manualOffset;return{id:'seg'+i,start,end,autoStart,autoEnd,sourceStart:autoStart,sourceEnd:autoEnd,manualOffset,targetDuration:Math.max(.4,autoEnd-autoStart),speaker_id:x.speaker_id||'S1',original:x.original||'',text:x.translated||'',emotion:x.emotion||'neutral',pace:x.pace||'normal',energy:x.energy||'medium',pitch_tendency:x.pitch_tendency||'variable',pauses:Array.isArray(x.pauses)?x.pauses:[],emphasized_words:Array.isArray(x.emphasized_words)?x.emphasized_words:[],intonation_contour:x.intonation_contour||'natural',delivery_instruction:x.delivery_instruction||'',alignment_method:x.alignment_method||'gemini_fallback',alignment_confidence:+x.alignment_confidence||0,alignment_warning:x.alignment_warning||null,audio:null,url:null,state:'wait',revision:0}});
+    S.speakers=d.speakers||[];S.segments=(d.segments||[]).map((x,i)=>{const autoStart=Number.isFinite(+x.auto_start)?+x.auto_start:(+x.start||0),autoEnd=Math.max(autoStart+.2,Number.isFinite(+x.auto_end)?+x.auto_end:(+x.end||autoStart+2)),manualOffset=+x.manual_offset||0,start=autoStart+manualOffset,end=autoEnd+manualOffset;return{id:'seg'+i,start,end,autoStart,autoEnd,sourceStart:autoStart,sourceEnd:autoEnd,manualOffset,targetDuration:Math.max(.4,autoEnd-autoStart),speaker_id:x.speaker_id||'S1',original:x.original||'',text:x.translated||'',emotion:x.emotion||'neutral',pace:x.pace||'normal',energy:x.energy||'medium',pitch_tendency:x.pitch_tendency||'variable',pauses:Array.isArray(x.pauses)?x.pauses:[],emphasized_words:Array.isArray(x.emphasized_words)?x.emphasized_words:[],intonation_contour:x.intonation_contour||'natural',delivery_instruction:x.delivery_instruction||'',alignment_method:x.alignment_method||'gemini_fallback',alignment_confidence:+x.alignment_confidence||0,alignment_warning:x.alignment_warning||null,preserveOverlap:x.overlap_resolution==='confirmed_preserved'||x.alignment_method==='whisper_confirmed_overlap',playbackEnd:null,audio:null,url:null,state:'wait',revision:0}});
     if(!S.segments.length)throw{message:'В видео не найдена речь',help:[]};
     $('progress-fill').style.width='35%';renderSpeakers();renderPhrases();$('speakers-card').hidden=false;$('phrases-card').hidden=false;
     const shortened=d.lengthAdjusted?`, сокращено длинных реплик: ${d.lengthAdjusted}`:'',aligned=d.alignment?`, точная привязка: ${d.alignment.whisperRefined||0} Whisper / ${d.alignment.vadRegions||0} VAD`:'';
@@ -164,7 +164,7 @@ function moveSegment(id,value,commit=false){
   if(!raw||!Number.isFinite(parsed)){if(commit&&number)number.value=seg.start.toFixed(2);return}
   const next=Math.round(Math.max(0,Math.min(parsed,limit))*1000)/1000,wasClamped=Math.abs(next-parsed)>.0005;
   stopAudio(id);completedSources.delete(id);seg.start=next;seg.end=next+duration;seg.manualOffset=next-(seg.autoStart??seg.sourceStart??0);
-  if(buffers[id]){buffers[id].start=seg.start;buffers[id].end=seg.end}
+  if(buffers[id]){buffers[id].start=seg.start;buffers[id].end=seg.end}refreshPlaybackPlans();
   const time=$('time-'+id),range=$('position-'+id),reset=$('position-reset-'+id);
   if(time)time.textContent=fmtExact(seg.start);if(range)range.value=seg.start.toFixed(2);if(number&&(number!==document.activeElement||commit||wasClamped))number.value=seg.start.toFixed(2);
   if(reset)reset.disabled=Math.abs(seg.start-(seg.sourceStart??seg.start))<=.001;
@@ -175,7 +175,33 @@ function resetSegmentPosition(id){const seg=S.segments.find(x=>x.id===id);if(seg
 function previewSegment(id){const seg=S.segments.find(x=>x.id===id);if(seg){completedSources.delete(id);video.currentTime=seg.start;video.play()}}
 function jump(time){video.currentTime=time;video.play()}
 
-async function voiceRequest(seg){const sp=speaker(seg.speaker_id);const r=await fetch('/api/voice',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({language:S.languageCode,segments:[{id:seg.id,text:seg.text,original:seg.original,voice:sp.voice,delivery:sp.delivery,delivery_instruction:seg.delivery_instruction,emotion:seg.emotion,pace:seg.pace,energy:seg.energy,pitch_tendency:seg.pitch_tendency,pauses:seg.pauses,emphasized_words:seg.emphasized_words,intonation_contour:seg.intonation_contour,duration:Math.max(.4,seg.targetDuration||seg.autoEnd-seg.autoStart||seg.end-seg.start)}]})});const d=await r.json();if(!r.ok)throw errorInfo(d);return d.results?.[0]||{ok:false,error:{message:'Пустой ответ'}}}
+function nextSequentialStart(seg){
+  let next=null;
+  for(const candidate of S.segments){
+    if(candidate===seg||candidate.start<=seg.start+.001)continue;
+    if(candidate.preserveOverlap)continue;
+    if(next===null||candidate.start<next)next=candidate.start;
+  }
+  return next;
+}
+function availableSpeechDuration(seg){
+  const aligned=Math.max(.2,seg.end-seg.start),target=Math.max(.2,Math.min(aligned,seg.targetDuration||aligned));
+  const nextStart=nextSequentialStart(seg);
+  return nextStart===null?target:Math.max(.2,Math.min(target,nextStart-seg.start));
+}
+function refreshPlaybackPlans(){
+  for(const seg of S.segments){
+    const info=buffers[seg.id];if(!info)continue;
+    const target=availableSpeechDuration(seg),nextStart=nextSequentialStart(seg);
+    const rate=info.buffer.duration>target?Math.min(1.08,info.buffer.duration/target):1;
+    const naturalEnd=seg.start+Math.max(.2,info.buffer.duration/rate);
+    const capEnd=Math.max(seg.start+.2,Math.min(seg.end,nextStart===null?seg.end:nextStart));
+    info.start=seg.start;info.rate=rate;info.end=Math.min(naturalEnd,capEnd);
+    info.trimmed=naturalEnd>capEnd+.01;seg.playbackEnd=info.end;
+  }
+}
+
+async function voiceRequest(seg){const sp=speaker(seg.speaker_id);const r=await fetch('/api/voice',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({language:S.languageCode,segments:[{id:seg.id,text:seg.text,original:seg.original,voice:sp.voice,delivery:sp.delivery,delivery_instruction:seg.delivery_instruction,emotion:seg.emotion,pace:seg.pace,energy:seg.energy,pitch_tendency:seg.pitch_tendency,pauses:seg.pauses,emphasized_words:seg.emphasized_words,intonation_contour:seg.intonation_contour,duration:availableSpeechDuration(seg)}]})});const d=await r.json();if(!r.ok)throw errorInfo(d);return d.results?.[0]||{ok:false,error:{message:'Пустой ответ'}}}
 async function voiceSegments(segments,base=0){const todo=segments.filter(x=>x.text.trim()&&x.state!=='ok'),exportButton=$('export');let done=0,failed=0;exportButton.disabled=true;showStatus('work',`Озвучиваю ${todo.length} реплик разными голосами…`,true);
   for(const seg of todo){
     const revision=seg.revision||0,runId=S.runId,voiceAtStart=speaker(seg.speaker_id).voice;
@@ -183,7 +209,7 @@ async function voiceSegments(segments,base=0){const todo=segments.filter(x=>x.te
     try{
       const res=await voiceRequest(seg);
       if(runId!==S.runId||revision!==(seg.revision||0)||voiceAtStart!==speaker(seg.speaker_id).voice){done++;continue;}
-      if(res.ok){seg.audio=res.filename;seg.url=res.url;seg.audioDuration=+res.audioDuration||0;seg.recommendedRate=+res.recommendedRate||1;seg.durationWarning=res.durationWarning||null;if(seg.audioDuration>0)seg.end=seg.start+Math.max(.2,seg.audioDuration/Math.min(1.08,Math.max(1,seg.recommendedRate)));seg.state='ok';await loadBuffer(seg)}else{seg.state='error';seg.error=errorInfo(res.error);failed++}
+      if(res.ok){seg.audio=res.filename;seg.url=res.url;seg.audioDuration=+res.audioDuration||0;seg.recommendedRate=+res.recommendedRate||1;seg.durationWarning=res.durationWarning||null;seg.state='ok';await loadBuffer(seg)}else{seg.state='error';seg.error=errorInfo(res.error);failed++}
     }catch(e){if(runId===S.runId&&revision===(seg.revision||0)){seg.state='error';seg.error=e.message?e:errorInfo(e);failed++}}
     done++;paint(seg);$('progress-fill').style.width=(base+(100-base)*done/Math.max(1,todo.length))+'%'
   }
@@ -196,7 +222,7 @@ async function voiceOne(id){
   try{
     const res=await voiceRequest(seg);
     if(runId!==S.runId||revision!==(seg.revision||0)||voiceAtStart!==speaker(seg.speaker_id).voice){exportButton.disabled=false;return;}
-    if(res.ok){seg.audio=res.filename;seg.url=res.url;seg.audioDuration=+res.audioDuration||0;seg.recommendedRate=+res.recommendedRate||1;seg.durationWarning=res.durationWarning||null;if(seg.audioDuration>0)seg.end=seg.start+Math.max(.2,seg.audioDuration/Math.min(1.08,Math.max(1,seg.recommendedRate)));seg.state='ok';await loadBuffer(seg);renderPhrases()}
+    if(res.ok){seg.audio=res.filename;seg.url=res.url;seg.audioDuration=+res.audioDuration||0;seg.recommendedRate=+res.recommendedRate||1;seg.durationWarning=res.durationWarning||null;seg.state='ok';await loadBuffer(seg);renderPhrases()}
     else{seg.state='error';paint(seg);toast('err',errorInfo(res.error).message)}
   }catch(e){if(runId===S.runId&&revision===(seg.revision||0)){seg.state='error';paint(seg);toast('err',e.message||'Ошибка озвучки')}}
   exportButton.disabled=false;
@@ -209,11 +235,7 @@ async function loadBuffer(seg){
   try{
     const ctx=audioContext(),data=await(await fetch(url)).arrayBuffer(),buffer=await ctx.decodeAudioData(data);
     if(runId!==S.runId||revision!==(seg.revision||0)||url!==seg.url)return;
-    const target=Math.max(.4,seg.targetDuration||seg.autoEnd-seg.autoStart||seg.end-seg.start);
-    const rate=buffer.duration>target?Math.min(1.08,buffer.duration/target):1;
-    const effectiveDuration=Math.max(.2,buffer.duration/rate);
-    seg.end=seg.start+effectiveDuration;
-    completedSources.delete(seg.id);buffers[seg.id]={buffer,start:seg.start,end:seg.end,rate};
+    completedSources.delete(seg.id);buffers[seg.id]={buffer,start:seg.start,end:seg.end,rate:1,trimmed:false};refreshPlaybackPlans();
   }catch(e){console.warn(e)}
 }
 let syncFrame=0,syncBuffering=false;const completedSources=new Set();
@@ -246,9 +268,12 @@ video.addEventListener('seeked',syncDubbingAudioNow);
 video.addEventListener('ratechange',()=>{stopAll();syncDubbingAudioNow()});
 video.addEventListener('timeupdate',syncDubbingAudioNow);
 function startAudio(id,timelineOffset){
-  const ctx=audioContext(),info=buffers[id],src=ctx.createBufferSource();
-  const safeOffset=timelineOffset>.04?timelineOffset*info.rate:0;
-  src.buffer=info.buffer;src.playbackRate.value=info.rate*Math.max(.1,video.playbackRate||1);src.connect(ctx.destination);src.start(ctx.currentTime,Math.max(0,safeOffset));sources[id]=src;
+  const ctx=audioContext(),info=buffers[id],src=ctx.createBufferSource(),gain=ctx.createGain();
+  const videoRate=Math.max(.1,video.playbackRate||1),safeOffset=timelineOffset>.04?timelineOffset*info.rate:0;
+  const timelineRemaining=Math.max(.01,info.end-(info.start+timelineOffset)),realRemaining=timelineRemaining/videoRate;
+  src.buffer=info.buffer;src.playbackRate.value=info.rate*videoRate;src.connect(gain);gain.connect(ctx.destination);
+  if(info.trimmed){const fade=Math.min(.08/videoRate,realRemaining/2);gain.gain.setValueAtTime(1,ctx.currentTime);gain.gain.setValueAtTime(1,ctx.currentTime+Math.max(0,realRemaining-fade));gain.gain.linearRampToValueAtTime(0,ctx.currentTime+realRemaining)}
+  src.start(ctx.currentTime,Math.max(0,safeOffset));if(info.trimmed)src.stop(ctx.currentTime+realRemaining+.01);sources[id]=src;
   src.onended=()=>{if(sources[id]===src){delete sources[id];completedSources.add(id)}}
 }
 function stopAudio(id){try{sources[id]?.stop()}catch{}delete sources[id]}
@@ -260,7 +285,7 @@ function resetDubbingAudio(){
 
 $('volume').oninput=e=>{S.volume=e.target.value/100;video.volume=S.volume;$('volume-value').textContent=e.target.value+'%'};
 $('export').onclick=async()=>{const ready=S.segments.filter(x=>x.audio);if(!ready.length)return toast('err','Нет готовых реплик');$('export').disabled=true;const box=$('export-status');box.hidden=false;box.className='status work';box.innerHTML='<span class="spin"></span><span>Подгоняю реплики по таймингам и собираю видео…</span>';
-  try{const r=await fetch('/api/export',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({video:S.file,originalVolume:S.volume,segments:ready.map(x=>({audio:x.audio,start:x.start,end:x.end}))})}),d=await r.json();if(!r.ok||!d.ok)throw Error(d.error||'Экспорт не удался');box.className='status ok';box.innerHTML=`Готово. <a class="download" href="${d.url}" download>Скачать ${esc(d.filename)}</a>`;toast('ok','Видео готово')}catch(e){box.className='status err';box.textContent=e.message;toast('err','Ошибка экспорта')}finally{$('export').disabled=false}};
+  try{const r=await fetch('/api/export',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({video:S.file,originalVolume:S.volume,segments:ready.map(x=>({audio:x.audio,start:x.start,end:x.playbackEnd??x.end,preserveOverlap:x.preserveOverlap}))})}),d=await r.json();if(!r.ok||!d.ok)throw Error(d.error||'Экспорт не удался');box.className='status ok';box.innerHTML=`Готово. <a class="download" href="${d.url}" download>Скачать ${esc(d.filename)}</a>`;toast('ok','Видео готово')}catch(e){box.className='status err';box.textContent=e.message;toast('err','Ошибка экспорта')}finally{$('export').disabled=false}};
 </script>
 </body>
 </html>
