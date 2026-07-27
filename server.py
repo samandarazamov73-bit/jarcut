@@ -76,6 +76,282 @@ LANGS = {
     "ko": "Korean", "ja": "Japanese",
 }
 
+TTS_PROMPT_LOCALES = {
+    "uz": {
+        "natural": "Tabiiy ijro eting va asl hissiyotni saqlang.",
+        "none": "yo‘q",
+        "template": (
+            "Tarjima qilingan dialogni professional kino dublyaji aktyori kabi ijro eting. "
+            "Faqat Dialog bo‘limidagi matnni ayting; ko‘rsatmalarni ovoz chiqarib o‘qimang. "
+            "Ijro ko‘rsatmasi: {delivery} Intonatsiya: {intonation} "
+            "Tabiiy urg‘u beriladigan so‘zlar: {emphasis}. "
+            "Ichki pauzalar, so‘z raqami va millisekund: {pauses}. "
+            "Replikani taxminan {duration} soniyada tabiiy tugating. "
+            "Kirish pauzasisiz darhol gapirishni boshlang. Dialog: {text}"
+        ),
+    },
+    "ru": {
+        "natural": "Играйте естественно и сохраняйте исходную эмоцию.",
+        "none": "нет",
+        "template": (
+            "Исполните переведённую реплику как профессиональный актёр кинодубляжа. "
+            "Произносите только текст после слова «Диалог»; не читайте инструкции вслух. "
+            "Указание по исполнению: {delivery} Интонация: {intonation} "
+            "Слова для естественного выделения: {emphasis}. "
+            "Внутренние паузы, номер слова и миллисекунды: {pauses}. "
+            "Естественно закончите реплику примерно за {duration} секунды. "
+            "Начните говорить сразу, без вступительной паузы. Диалог: {text}"
+        ),
+    },
+    "en": {
+        "natural": "Perform naturally and preserve the original emotion.",
+        "none": "none",
+        "template": (
+            "Perform the translated line like a professional film dubbing actor. "
+            "Speak only the text after Dialogue; never read the instructions aloud. "
+            "Performance direction: {delivery} Intonation: {intonation} "
+            "Words to emphasize naturally: {emphasis}. "
+            "Internal pauses, word number and milliseconds: {pauses}. "
+            "Finish naturally in approximately {duration} seconds. "
+            "Start speaking immediately without an introductory pause. Dialogue: {text}"
+        ),
+    },
+    "tr": {
+        "natural": "Doğal oynayın ve özgün duyguyu koruyun.",
+        "none": "yok",
+        "template": (
+            "Çevrilmiş repliği profesyonel bir film dublaj sanatçısı gibi seslendirin. "
+            "Yalnızca Diyalog bölümündeki metni söyleyin; talimatları sesli okumayın. "
+            "Oyunculuk talimatı: {delivery} Tonlama: {intonation} "
+            "Doğal vurgu yapılacak sözcükler: {emphasis}. "
+            "İç duraklamalar, sözcük numarası ve milisaniye: {pauses}. "
+            "Repliği yaklaşık {duration} saniyede doğal biçimde bitirin. "
+            "Giriş duraklaması olmadan hemen konuşmaya başlayın. Diyalog: {text}"
+        ),
+    },
+    "kk": {
+        "natural": "Табиғи орындап, бастапқы эмоцияны сақтаңыз.",
+        "none": "жоқ",
+        "template": (
+            "Аударылған репликаны кәсіби кино дубляжының актері сияқты орындаңыз. "
+            "Тек Диалог бөліміндегі мәтінді айтыңыз; нұсқауларды дауыстап оқымаңыз. "
+            "Орындау нұсқауы: {delivery} Интонация: {intonation} "
+            "Табиғи екпін түсетін сөздер: {emphasis}. "
+            "Ішкі үзілістер, сөз нөмірі және миллисекунд: {pauses}. "
+            "Репликаны шамамен {duration} секундта табиғи аяқтаңыз. "
+            "Кіріспе үзіліссіз бірден сөйлеңіз. Диалог: {text}"
+        ),
+    },
+    "ky": {
+        "natural": "Табигый аткарып, баштапкы эмоцияны сактаңыз.",
+        "none": "жок",
+        "template": (
+            "Которулган репликаны кесипкөй кино дубляж актёру сыяктуу аткарыңыз. "
+            "Диалог бөлүмүндөгү текстти гана айтыңыз; көрсөтмөлөрдү үн чыгарып окубаңыз. "
+            "Аткаруу көрсөтмөсү: {delivery} Интонация: {intonation} "
+            "Табигый басым жасалуучу сөздөр: {emphasis}. "
+            "Ички тыныгуулар, сөздүн номери жана миллисекунд: {pauses}. "
+            "Репликаны болжол менен {duration} секундда табигый бүтүрүңүз. "
+            "Киришүү тыныгуусуз дароо сүйлөп баштаңыз. Диалог: {text}"
+        ),
+    },
+    "tg": {
+        "natural": "Табиӣ иҷро кунед ва эҳсоси аслиро нигоҳ доред.",
+        "none": "нест",
+        "template": (
+            "Ҷумларо мисли ҳунарпешаи касбии дубляжи филм иҷро кунед. "
+            "Танҳо матни қисми Муколамаро бигӯед; дастурҳоро бо овоз нахонед. "
+            "Дастури иҷро: {delivery} Оҳанг: {intonation} "
+            "Калимаҳои таъкидшаванда: {emphasis}. "
+            "Таваққуфҳои дохилӣ, рақами калима ва миллисония: {pauses}. "
+            "Ҷумларо тақрибан дар {duration} сония табиӣ анҷом диҳед. "
+            "Бе таваққуфи муқаддимавӣ фавран суханро оғоз кунед. Муколама: {text}"
+        ),
+    },
+    "ar": {
+        "natural": "أدِّ الأداء بصورة طبيعية مع الحفاظ على الإحساس الأصلي.",
+        "none": "لا يوجد",
+        "template": (
+            "أدِّ الجملة المترجمة كممثل دبلجة سينمائية محترف. "
+            "انطق فقط النص الموجود بعد كلمة الحوار، ولا تقرأ التعليمات بصوت مرتفع. "
+            "توجيه الأداء: {delivery} التنغيم: {intonation} "
+            "الكلمات المطلوب إبرازها طبيعيًا: {emphasis}. "
+            "الوقفات الداخلية، رقم الكلمة والمللي ثانية: {pauses}. "
+            "أنه الجملة بصورة طبيعية خلال نحو {duration} ثانية. "
+            "ابدأ الكلام فورًا من دون وقفة تمهيدية. الحوار: {text}"
+        ),
+    },
+    "de": {
+        "natural": "Spiele natürlich und bewahre die ursprüngliche Emotion.",
+        "none": "keine",
+        "template": (
+            "Sprich die übersetzte Zeile wie ein professioneller Filmsynchronsprecher. "
+            "Sprich nur den Text nach Dialog; lies die Anweisungen niemals laut vor. "
+            "Spielanweisung: {delivery} Intonation: {intonation} "
+            "Natürlich zu betonende Wörter: {emphasis}. "
+            "Pausen, Wortnummer und Millisekunden: {pauses}. "
+            "Beende die Zeile natürlich in ungefähr {duration} Sekunden. "
+            "Beginne sofort und ohne einleitende Pause. Dialog: {text}"
+        ),
+    },
+    "fr": {
+        "natural": "Jouez naturellement en conservant l’émotion d’origine.",
+        "none": "aucun",
+        "template": (
+            "Interprétez la réplique traduite comme un comédien professionnel de doublage. "
+            "Prononcez uniquement le texte après Dialogue; ne lisez jamais les consignes à voix haute. "
+            "Consigne de jeu: {delivery} Intonation: {intonation} "
+            "Mots à souligner naturellement: {emphasis}. "
+            "Pauses internes, numéro du mot et millisecondes: {pauses}. "
+            "Terminez naturellement la réplique en environ {duration} secondes. "
+            "Commencez immédiatement, sans pause d’introduction. Dialogue: {text}"
+        ),
+    },
+    "es": {
+        "natural": "Interpreta con naturalidad y conserva la emoción original.",
+        "none": "ninguno",
+        "template": (
+            "Interpreta la frase traducida como un actor profesional de doblaje cinematográfico. "
+            "Di únicamente el texto después de Diálogo; no leas las instrucciones en voz alta. "
+            "Indicación interpretativa: {delivery} Entonación: {intonation} "
+            "Palabras que deben destacarse con naturalidad: {emphasis}. "
+            "Pausas internas, número de palabra y milisegundos: {pauses}. "
+            "Termina la frase con naturalidad en unos {duration} segundos. "
+            "Empieza a hablar de inmediato, sin pausa introductoria. Diálogo: {text}"
+        ),
+    },
+    "ko": {
+        "natural": "원래 감정을 유지하며 자연스럽게 연기하세요.",
+        "none": "없음",
+        "template": (
+            "번역된 대사를 전문 영화 더빙 배우처럼 연기하세요. "
+            "대화 뒤의 문장만 말하고 지시문은 소리 내어 읽지 마세요. "
+            "연기 지시: {delivery} 억양: {intonation} "
+            "자연스럽게 강조할 단어: {emphasis}. "
+            "내부 쉼, 단어 번호와 밀리초: {pauses}. "
+            "약 {duration}초 안에 대사를 자연스럽게 끝내세요. "
+            "도입부의 쉼 없이 즉시 말하기 시작하세요. 대화: {text}"
+        ),
+    },
+    "ja": {
+        "natural": "元の感情を保ちながら自然に演じてください。",
+        "none": "なし",
+        "template": (
+            "翻訳された台詞をプロの映画吹き替え俳優のように演じてください。 "
+            "「台詞」の後の文章だけを話し、指示を声に出して読まないでください。 "
+            "演技指示: {delivery} イントネーション: {intonation} "
+            "自然に強調する語: {emphasis}。 "
+            "内部の間、語番号とミリ秒: {pauses}。 "
+            "約{duration}秒で自然に台詞を終えてください。 "
+            "導入の間を置かず、すぐに話し始めてください。 台詞: {text}"
+        ),
+    },
+}
+
+_PROSODY_KEYS = {
+    "emotion": ("neutral", "happy", "sad", "angry", "surprised", "fearful", "skeptical", "sarcastic", "urgent", "calm", "whispering", "serious"),
+    "pace": ("slow", "normal", "fast"),
+    "energy": ("low", "medium", "high", "whisper"),
+    "pitch": ("flat", "rising", "falling", "rising_falling", "variable"),
+}
+
+
+def _localized_prosody_terms(
+    emotion: tuple[str, ...],
+    pace: tuple[str, ...],
+    energy: tuple[str, ...],
+    pitch: tuple[str, ...],
+) -> dict[str, dict[str, str]]:
+    return {
+        name: dict(zip(_PROSODY_KEYS[name], values))
+        for name, values in {
+            "emotion": emotion, "pace": pace, "energy": energy, "pitch": pitch
+        }.items()
+    }
+
+
+TTS_PROSODY_TERMS = {
+    "uz": _localized_prosody_terms(
+        ("betaraf", "quvnoq", "g‘amgin", "jahldor", "hayratlangan", "qo‘rqqan", "shubhali", "kinoyali", "shoshilinch", "xotirjam", "pichirlab", "jiddiy"),
+        ("sekin", "odatiy", "tez"), ("past", "o‘rta", "yuqori", "pichirlash"),
+        ("tekis", "ko‘tariluvchi", "pasayuvchi", "ko‘tarilib-pasayuvchi", "o‘zgaruvchan"),
+    ),
+    "ru": _localized_prosody_terms(
+        ("нейтральная", "радостная", "грустная", "сердитая", "удивлённая", "испуганная", "скептическая", "саркастическая", "срочная", "спокойная", "шёпот", "серьёзная"),
+        ("медленный", "обычный", "быстрый"), ("низкая", "средняя", "высокая", "шёпот"),
+        ("ровное", "восходящее", "нисходящее", "восходяще-нисходящее", "переменное"),
+    ),
+    "en": _localized_prosody_terms(
+        _PROSODY_KEYS["emotion"], _PROSODY_KEYS["pace"], _PROSODY_KEYS["energy"], _PROSODY_KEYS["pitch"],
+    ),
+    "tr": _localized_prosody_terms(
+        ("tarafsız", "mutlu", "üzgün", "öfkeli", "şaşkın", "korkmuş", "kuşkucu", "alaycı", "acil", "sakin", "fısıltılı", "ciddi"),
+        ("yavaş", "normal", "hızlı"), ("düşük", "orta", "yüksek", "fısıltı"),
+        ("düz", "yükselen", "alçalan", "yükselip alçalan", "değişken"),
+    ),
+    "kk": _localized_prosody_terms(
+        ("бейтарап", "қуанышты", "мұңды", "ашулы", "таңғалған", "қорыққан", "күмәнді", "мысқылды", "шұғыл", "сабырлы", "сыбырлап", "байсалды"),
+        ("баяу", "қалыпты", "жылдам"), ("төмен", "орташа", "жоғары", "сыбыр"),
+        ("тегіс", "көтерілетін", "төмендейтін", "көтеріліп-төмендейтін", "құбылмалы"),
+    ),
+    "ky": _localized_prosody_terms(
+        ("бейтарап", "кубанычтуу", "кайгылуу", "ачуулуу", "таң калган", "корккон", "шектенген", "какшык", "шашылыш", "тынч", "шыбырап", "олуттуу"),
+        ("жай", "кадимки", "тез"), ("төмөн", "орточо", "жогорку", "шыбыр"),
+        ("тегиз", "көтөрүлгөн", "төмөндөгөн", "көтөрүлүп-төмөндөгөн", "өзгөрмө"),
+    ),
+    "tg": _localized_prosody_terms(
+        ("бетараф", "хурсанд", "ғамгин", "хашмгин", "ҳайратзада", "тарсида", "шубҳанок", "киноявӣ", "фаврӣ", "ором", "пичиррос", "ҷиддӣ"),
+        ("суст", "муқаррарӣ", "тез"), ("паст", "миёна", "баланд", "пичиррос"),
+        ("ҳамвор", "болораванда", "поёнраванда", "болораву поёнраванда", "тағйирёбанда"),
+    ),
+    "ar": _localized_prosody_terms(
+        ("محايد", "سعيد", "حزين", "غاضب", "مندهش", "خائف", "متشكك", "ساخر", "عاجل", "هادئ", "همس", "جاد"),
+        ("بطيء", "طبيعي", "سريع"), ("منخفضة", "متوسطة", "مرتفعة", "همس"),
+        ("ثابت", "صاعد", "هابط", "صاعد ثم هابط", "متغير"),
+    ),
+    "de": _localized_prosody_terms(
+        ("neutral", "fröhlich", "traurig", "wütend", "überrascht", "ängstlich", "skeptisch", "sarkastisch", "dringend", "ruhig", "geflüstert", "ernst"),
+        ("langsam", "normal", "schnell"), ("niedrig", "mittel", "hoch", "Flüstern"),
+        ("gleichbleibend", "ansteigend", "abfallend", "ansteigend und abfallend", "wechselnd"),
+    ),
+    "fr": _localized_prosody_terms(
+        ("neutre", "joyeuse", "triste", "colérique", "surprise", "craintive", "sceptique", "sarcastique", "urgente", "calme", "chuchotée", "sérieuse"),
+        ("lent", "normal", "rapide"), ("faible", "moyenne", "forte", "chuchotée"),
+        ("stable", "montante", "descendante", "montante puis descendante", "variable"),
+    ),
+    "es": _localized_prosody_terms(
+        ("neutra", "alegre", "triste", "enfadada", "sorprendida", "temerosa", "escéptica", "sarcástica", "urgente", "tranquila", "susurrada", "seria"),
+        ("lento", "normal", "rápido"), ("baja", "media", "alta", "susurro"),
+        ("plano", "ascendente", "descendente", "ascendente y descendente", "variable"),
+    ),
+    "ko": _localized_prosody_terms(
+        ("중립", "기쁨", "슬픔", "분노", "놀람", "두려움", "회의적", "냉소적", "긴급", "차분함", "속삭임", "진지함"),
+        ("느리게", "보통", "빠르게"), ("낮게", "중간", "높게", "속삭임"),
+        ("평탄", "상승", "하강", "상승 후 하강", "변화형"),
+    ),
+    "ja": _localized_prosody_terms(
+        ("中立", "喜び", "悲しみ", "怒り", "驚き", "恐れ", "懐疑的", "皮肉", "緊急", "穏やか", "ささやき", "真剣"),
+        ("ゆっくり", "普通", "速く"), ("低い", "中程度", "高い", "ささやき"),
+        ("平坦", "上昇", "下降", "上昇して下降", "変化"),
+    ),
+}
+
+TTS_STYLE_TEMPLATES = {
+    "uz": "Hissiyot: {emotion}; sur’at: {pace}; energiya: {energy}; ohang harakati: {pitch}.",
+    "ru": "Эмоция: {emotion}; темп: {pace}; энергия: {energy}; движение тона: {pitch}.",
+    "en": "Emotion: {emotion}; pace: {pace}; energy: {energy}; pitch movement: {pitch}.",
+    "tr": "Duygu: {emotion}; tempo: {pace}; enerji: {energy}; perde hareketi: {pitch}.",
+    "kk": "Эмоция: {emotion}; қарқын: {pace}; қуат: {energy}; дауыс биіктігінің қозғалысы: {pitch}.",
+    "ky": "Эмоция: {emotion}; ыргак: {pace}; энергия: {energy}; үн бийиктигинин кыймылы: {pitch}.",
+    "tg": "Эҳсос: {emotion}; суръат: {pace}; нерӯ: {energy}; ҳаракати оҳанг: {pitch}.",
+    "ar": "الإحساس: {emotion}؛ السرعة: {pace}؛ الطاقة: {energy}؛ حركة النبرة: {pitch}.",
+    "de": "Emotion: {emotion}; Tempo: {pace}; Energie: {energy}; Tonhöhenverlauf: {pitch}.",
+    "fr": "Émotion: {emotion}; rythme: {pace}; énergie: {energy}; mouvement mélodique: {pitch}.",
+    "es": "Emoción: {emotion}; ritmo: {pace}; energía: {energy}; movimiento tonal: {pitch}.",
+    "ko": "감정: {emotion}; 속도: {pace}; 에너지: {energy}; 음높이 움직임: {pitch}.",
+    "ja": "感情: {emotion}、速度: {pace}、エネルギー: {energy}、音高の動き: {pitch}。",
+}
+
 VOICES = {
     "Kore", "Puck", "Charon", "Fenrir", "Aoede", "Leda", "Orus",
     "Zephyr", "Callirrhoe", "Autonoe", "Enceladus", "Iapetus", "Umbriel",
@@ -1212,13 +1488,26 @@ def _verify_transition_pair_with_embeddings(
         return False
 
     last_previous, first_current = transition
-    # The beginning of a current-dominant one-second window can still contain
-    # the prior voice. Use the end of the immediately preceding previous-dominant
-    # window as a conservative no-early-start floor.
-    boundary_floor = max(
-        0.0,
-        last_previous + SPEAKER_SCAN_WINDOW_SECONDS / 2,
+    previous_item = next(
+        item for item in centers if float(item["time"]) == last_previous
     )
+    current_item = next(
+        item for item in centers if float(item["time"]) == first_current
+    )
+    previous_delta = float(previous_item["current"]) - float(previous_item["previous"])
+    current_delta = float(current_item["current"]) - float(current_item["previous"])
+    delta_span = current_delta - previous_delta
+    if delta_span <= 1e-6:
+        current["speaker_verification"] = "voice_change_unconfirmed"
+        return False
+
+    # ECAPA scores are smoothed across one-second windows. Interpolate the point
+    # where current-vs-previous similarity crosses zero instead of using the end
+    # of the previous window, which systematically delayed the new voice by about
+    # a quarter second at the 250 ms scan step.
+    crossover_ratio = max(0.0, min(1.0, -previous_delta / delta_span))
+    score_crossover = last_previous + (first_current - last_previous) * crossover_ratio
+    boundary_floor = max(0.0, score_crossover + TRANSITION_SAFETY_MARGIN_SECONDS)
     old_start = float(current.get("auto_start", current["gemini_start"]))
     new_start = max(old_start, boundary_floor)
     current.update({
@@ -1226,6 +1515,7 @@ def _verify_transition_pair_with_embeddings(
         "auto_end": round(max(new_start + 0.2, float(current["auto_end"])), 3),
         "speaker_verification": "ecapa_confirmed",
         "speaker_boundary_floor": round(boundary_floor, 3),
+        "speaker_score_crossover": round(score_crossover, 3),
         "speaker_previous_last_center": round(last_previous, 3),
         "speaker_current_first_center": round(first_current, 3),
     })
@@ -1579,9 +1869,9 @@ def normalize_segment_prosody(segment: dict[str, Any]) -> None:
     segment["pace"] = pace if pace in allowed_pace else "normal"
     segment["energy"] = energy if energy in allowed_energy else "medium"
     segment["pitch_tendency"] = pitch if pitch in allowed_pitch else "variable"
-    segment["intonation_contour"] = str(segment.get("intonation_contour") or "natural").strip()[:200]
+    segment["intonation_contour"] = str(segment.get("intonation_contour") or "").strip()[:200]
     segment["delivery_instruction"] = str(
-        segment.get("delivery_instruction") or "Perform naturally and preserve the original emotion."
+        segment.get("delivery_instruction") or ""
     ).strip()[:300]
     emphasized = segment.get("emphasized_words")
     segment["emphasized_words"] = [str(item).strip() for item in emphasized[:8] if str(item).strip()] if isinstance(emphasized, list) else []
@@ -1624,7 +1914,7 @@ Return exactly one JSON object with this structure:
       "id": "S1",
       "label": "Speaker 1",
       "voice_character": "masculine|feminine|young|neutral",
-      "delivery": "short description of pitch, age impression, energy and emotion"
+      "delivery": "short description of pitch, age impression, energy and emotion, written in {target_language}"
     }}
   ],
   "segments": [
@@ -1640,8 +1930,8 @@ Return exactly one JSON object with this structure:
       "pitch_tendency": "flat|rising|falling|rising_falling|variable",
       "pauses": [{{"after_word_index": 2, "duration_ms": 180}}],
       "emphasized_words": ["translated word to stress"],
-      "intonation_contour": "short description of the pitch movement",
-      "delivery_instruction": "one concise instruction for a dubbing actor"
+      "intonation_contour": "short description of the pitch movement written in {target_language}",
+      "delivery_instruction": "one concise instruction for a dubbing actor written in {target_language}"
     }}
   ]
 }}
@@ -1653,6 +1943,8 @@ Requirements:
 - Keep translated speech short enough to fit the original time window.
 - Preserve intent, politeness, humor and emotion.
 - Analyze prosody for EACH segment, not only for the speaker: pace, energy, pitch movement, pauses longer than 150 ms, and emphasis.
+- Write every free-text acting field — speaker delivery, intonation_contour, and delivery_instruction — entirely in {target_language}. Never write those fields in English unless the target language is English.
+- delivery_instruction must summarize the segment's emotion, pace, energy, and pitch in natural actor-facing language.
 - emphasized_words must contain words from the translated dialogue, not the original language.
 - delivery_instruction must be one or two concise sentences describing how to perform this translated line naturally.
 - Never infer identity or actual gender; voice_character only describes audible vocal presentation for voice casting.
@@ -1980,6 +2272,8 @@ async def translate(request: Request) -> dict[str, Any]:
     return {
         "ok": True,
         "model": TRANSCRIBE_MODEL,
+        "languageCode": language_code,
+        "targetLanguage": target_language,
         "speakers": speakers,
         "segments": segments,
         "lengthAdjusted": length_adjusted,
@@ -2045,6 +2339,57 @@ def trim_tts_leading_silence(source: Path) -> Path:
         return source
 
 
+def build_tts_prompt(
+    text: str,
+    language_code: str,
+    delivery: str,
+    emotion: str,
+    pace: str,
+    energy: str,
+    pitch_tendency: str,
+    intonation_contour: str,
+    emphasized_words: list[str] | None,
+    pauses: list[dict[str, Any]] | None,
+    target_duration: float,
+) -> str:
+    """Build actor directions entirely in the selected dubbing language."""
+    code = language_code if language_code in TTS_PROMPT_LOCALES else "uz"
+    locale = TTS_PROMPT_LOCALES[code]
+    generic_values = {"", "natural", "none", "default"}
+    localized_delivery = str(delivery or "").strip()
+    if localized_delivery.casefold() in generic_values:
+        localized_delivery = locale["natural"]
+    localized_intonation = str(intonation_contour or "").strip()
+    if localized_intonation.casefold() in generic_values:
+        localized_intonation = locale["natural"]
+    terms = TTS_PROSODY_TERMS[code]
+    style = TTS_STYLE_TEMPLATES[code].format(
+        emotion=terms["emotion"].get(str(emotion).lower(), terms["emotion"]["neutral"]),
+        pace=terms["pace"].get(str(pace).lower(), terms["pace"]["normal"]),
+        energy=terms["energy"].get(str(energy).lower(), terms["energy"]["medium"]),
+        pitch=terms["pitch"].get(
+            str(pitch_tendency).lower(), terms["pitch"]["variable"]
+        ),
+    )
+    localized_delivery = f"{localized_delivery} {style}"
+    emphasis = ", ".join(
+        str(word).strip() for word in (emphasized_words or [])[:8] if str(word).strip()
+    ) or locale["none"]
+    pause_plan = ", ".join(
+        f"{max(1, int(item.get('after_word_index', 0)) + 1)} → {max(100, min(800, int(item.get('duration_ms', 150))))} ms"
+        for item in (pauses or [])[:6]
+        if isinstance(item, dict)
+    ) or locale["none"]
+    return locale["template"].format(
+        delivery=localized_delivery,
+        intonation=localized_intonation,
+        emphasis=emphasis,
+        pauses=pause_plan,
+        duration=f"{target_duration:.1f}",
+        text=text,
+    )
+
+
 async def synthesize(
     client: httpx.AsyncClient,
     text: str,
@@ -2052,6 +2397,7 @@ async def synthesize(
     emotion: str,
     delivery: str,
     target_duration: float,
+    language_code: str = "uz",
     pace: str = "normal",
     energy: str = "medium",
     pitch_tendency: str = "variable",
@@ -2061,21 +2407,18 @@ async def synthesize(
 ) -> dict[str, Any]:
     voice = voice if voice in VOICES else "Kore"
     target_duration = max(0.4, min(float(target_duration or 3), 30.0))
-    emphasis = ", ".join((emphasized_words or [])[:8]) or "none"
-    pause_directions = "; ".join(
-        f"after translated word {int(item.get('after_word_index', 0)) + 1}, make a {int(item.get('duration_ms', 150))} ms pause"
-        for item in (pauses or [])[:6]
-        if isinstance(item, dict)
-    ) or "no special internal pauses"
-    prompt = (
-        "Perform the translated dialogue like a professional film dubbing actor. "
-        f"Line-specific direction: {delivery or 'natural'}. "
-        f"Emotion: {emotion or 'neutral'}; pace: {pace}; energy: {energy}; "
-        f"pitch tendency: {pitch_tendency}; intonation contour: {intonation_contour}. "
-        f"Emphasize these translated words naturally: {emphasis}. Pause plan: {pause_directions}. "
-        f"Finish naturally in approximately {target_duration:.1f} seconds. "
-        "Start speaking immediately with no introductory pause or leading silence. "
-        "Instructions describe acting style, not words to read aloud. Speak only this dialogue: " + text
+    prompt = build_tts_prompt(
+        text=text,
+        language_code=language_code,
+        delivery=delivery,
+        emotion=emotion,
+        pace=pace,
+        energy=energy,
+        pitch_tendency=pitch_tendency,
+        intonation_contour=intonation_contour,
+        emphasized_words=emphasized_words,
+        pauses=pauses,
+        target_duration=target_duration,
     )
     payload = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
@@ -2146,6 +2489,10 @@ async def voice(request: Request) -> dict[str, Any]:
         raise HTTPException(500, {"code": "NO_KEY", "message": "Вставьте VERTEX_API_KEY в .env", "help": []})
 
     body = await request.json()
+    # Older direct API clients did not send a language and historically received
+    # English control instructions. The browser always sends its selected language.
+    requested_language_code = str(body.get("language") or "en").strip().lower()
+    language_code = requested_language_code if requested_language_code in LANGS else "en"
     output = []
     async with httpx.AsyncClient(timeout=180) as client:
         for segment in body.get("segments", []):
@@ -2160,6 +2507,7 @@ async def voice(request: Request) -> dict[str, Any]:
                 emotion=str(segment.get("emotion") or "neutral"),
                 delivery=str(segment.get("delivery_instruction") or segment.get("delivery") or "natural"),
                 target_duration=float(segment.get("duration") or 3),
+                language_code=language_code,
                 pace=str(segment.get("pace") or "normal"),
                 energy=str(segment.get("energy") or "medium"),
                 pitch_tendency=str(segment.get("pitch_tendency") or "variable"),
